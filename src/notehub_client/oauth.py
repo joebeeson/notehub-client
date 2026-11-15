@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
+from collections.abc import Mapping
+from typing import cast
 
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
@@ -23,7 +24,7 @@ class NotehubOAuthTokenProvider:
 
     async def __call__(self) -> str:
         async with self._lock:
-            token: dict[str, Any] | None = self._client.token
+            token = cast(Mapping[str, str | int | float] | None, self._client.token)
             if not token or float(token.get("expires_at", 0)) <= time.time() + self._leeway:
                 self._client.token = await self._client.fetch_token(
                     TOKEN_URL, grant_type="client_credentials"

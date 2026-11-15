@@ -32,7 +32,7 @@ The client owns its HTTPX pool when it creates it. Pass `http_client=httpx.Async
 
 ## OAuth
 
-Install `pip install "notehub-client[oauth]"`, then pass `NotehubOAuthTokenProvider(client_id, client_secret)` as `token_provider`. It obtains project-scoped client-credentials tokens and renews them before their 30-minute expiry. Keep the provider alive with the API client and close it with `await provider.aclose()` when done. Notehub does not issue a refresh token for this grant. PATs remain Blues' recommended authentication for new integrations. See the [authorization API](https://dev.blues.io/api-reference/notehub-api/authorization-api/).
+Install `pip install "notehub-client[oauth]"`, then import `NotehubOAuthTokenProvider` from `notehub_client.oauth` and pass `NotehubOAuthTokenProvider(client_id, client_secret)` as `token_provider`. It obtains project-scoped client-credentials tokens and renews them before their 30-minute expiry. Keep the provider alive with the API client and close it with `await provider.aclose()` when done. Notehub does not issue a refresh token for this grant. PATs remain Blues' recommended authentication for new integrations. See the [authorization API](https://dev.blues.io/api-reference/notehub-api/authorization-api/).
 
 ## API and pagination
 

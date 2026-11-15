@@ -1,6 +1,6 @@
 """Public error types."""
 
-from typing import Any
+from .types import JSONValue
 
 
 class NotehubError(Exception):
@@ -15,7 +15,12 @@ class NotehubAPIError(NotehubError):
     """Non-success response from Notehub."""
 
     def __init__(
-        self, status_code: int, message: str, *, payload: Any = None, retry_after: str | None = None
+        self,
+        status_code: int,
+        message: str,
+        *,
+        payload: JSONValue = None,
+        retry_after: str | None = None,
     ):
         super().__init__(message)
         self.status_code = status_code

@@ -9,7 +9,6 @@ from .errors import (
     NotehubRateLimitError,
     NotehubTransportError,
 )
-from .oauth import NotehubOAuthTokenProvider
 from .resources import NotehubResources
 
 __all__ = [
@@ -21,5 +20,4 @@ __all__ = [
     "NotehubRateLimitError",
     "NotehubTransportError",
     "NotehubResources",
-    "NotehubOAuthTokenProvider",
 ]

@@ -1,11 +1,6 @@
-"""Module entry point for ``python -m notehub_client``."""
+"""Enable ``python -m notehub_client`` through the package main module."""
 
-from .cli import cli
-
-
-def main() -> None:
-    cli()
-
+from .main import main
 
 if __name__ == "__main__":
     main()
