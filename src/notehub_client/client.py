@@ -1,55 +1,128 @@
-"""Async Notehub REST client."""
+"""Async Notehub transport and client lifecycle."""
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from typing import cast
-from urllib.parse import quote
+# TODO: Is this module and class getting a bit big for its britches?
+
+import math
+from http import HTTPStatus
+from typing import TYPE_CHECKING
+from urllib.parse import unquote
 
 import httpx
 
+from .constants import DEFAULT_TIMEOUT, NOTEHUB_API_ORIGIN
 from .errors import (
     NotehubAPIError,
     NotehubAuthenticationError,
     NotehubPermissionError,
     NotehubRateLimitError,
+    NotehubResponseError,
     NotehubTransportError,
 )
-from .resources import NotehubResources
-from .types import Device, Event, JSONObject, JSONValue, QueryValue
+from .helpers import validate_bearer_token, validate_json_value
+from .resources import (
+    BillingAccountsFacade,
+    DevicesFacade,
+    EventsFacade,
+    FleetsFacade,
+    JobsFacade,
+    MonitorsFacade,
+    NotesFacade,
+    OrganizationsFacade,
+    ProjectsFacade,
+    RoutesFacade,
+    UsageFacade,
+)
 
-TokenProvider = Callable[[], Awaitable[str]]
-BASE_URL = "https://api.notefile.net"
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Mapping
+
+    from .typing import JSONValue, QueryValue
+
+    TokenProvider = Callable[[], Awaitable[str]]
+
+BASE_URL = NOTEHUB_API_ORIGIN
 
 
 class NotehubClient:
-    """Async Notehub client. A supplied HTTPX client remains caller-owned."""
+    """Own the HTTP transport and expose Notehub domain operation facades.
 
+    Pass either a static bearer token or an async token provider. The client
+    closes HTTP clients it creates itself; an injected ``http_client`` remains
+    owned by the caller.
+    """
+
+    projects: ProjectsFacade
+    devices: DevicesFacade
+    events: EventsFacade
+    fleets: FleetsFacade
+    organizations: OrganizationsFacade
+    billing_accounts: BillingAccountsFacade
+    notes: NotesFacade
+    routes: RoutesFacade
+    jobs: JobsFacade
+    monitors: MonitorsFacade
+    usage: UsageFacade
+
+    # TODO: Should we check/fallback to like `environ["NOTEHUB_TOKEN"]` if it exists?
+    # TODO: I wonder if configuration is getting large enough to warrant its own handling.
     def __init__(
         self,
         token: str | None = None,
         *,
         token_provider: TokenProvider | None = None,
         http_client: httpx.AsyncClient | None = None,
-        timeout: float = 30.0,
+        timeout: float = DEFAULT_TIMEOUT,
         base_url: str = BASE_URL,
-    ):
-        if not token and token_provider is None:
-            raise ValueError("Provide a personal access token or async token_provider")
+    ) -> None:
+        if (token is None) == (token_provider is None):
+            raise ValueError("Provide exactly one token or token_provider")
+        if token_provider is not None and not callable(token_provider):
+            raise ValueError("token_provider must be an async callable")
+        if token is not None:
+            token = validate_bearer_token(token)
+        if type(timeout) not in {int, float} or not math.isfinite(timeout) or timeout < 0:
+            raise ValueError("timeout must be a nonnegative number")
+        base = httpx.URL(base_url)
+        if (
+            base.scheme not in {"http", "https"}
+            or not base.host
+            or base.userinfo
+            or base.path not in {"", "/"}
+            or base.query
+            or base.fragment
+        ):
+            raise ValueError("base_url must be an HTTP(S) origin without credentials or query")
         self._token = token
         self._provider = token_provider
         self._owns_http = http_client is None
-        self._http = http_client or httpx.AsyncClient(timeout=timeout)
-        self._base_url = base_url.rstrip("/")
-        self.resources = NotehubResources(self)
+        self._http = http_client if http_client is not None else httpx.AsyncClient(timeout=timeout)
+        self._base_url = str(base).rstrip("/")
+        self._closed = False
+        self.projects = ProjectsFacade(self)
+        self.devices = DevicesFacade(self)
+        self.events = EventsFacade(self)
+        self.fleets = FleetsFacade(self)
+        self.organizations = OrganizationsFacade(self)
+        self.billing_accounts = BillingAccountsFacade(self)
+        self.notes = NotesFacade(self)
+        self.routes = RoutesFacade(self)
+        self.jobs = JobsFacade(self)
+        self.monitors = MonitorsFacade(self)
+        self.usage = UsageFacade(self)
 
     async def __aenter__(self) -> NotehubClient:
+        if self._closed:
+            raise RuntimeError("NotehubClient is closed")
         return self
 
     async def __aexit__(self, *_: object) -> None:
         await self.aclose()
 
     async def aclose(self) -> None:
+        """Close the client and its HTTP transport when the client owns it."""
+        self._closed = True
         if self._owns_http:
             await self._http.aclose()
 
@@ -63,170 +136,58 @@ class NotehubClient:
         data: str | bytes | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> JSONValue:
+        """Request a relative /v1/ endpoint; return JSON or None for an empty response.
+
+        No retries or redirects are performed. API response bodies are not used in
+        exception messages because they can echo credentials or application data.
+        """
+        if self._closed:
+            raise RuntimeError("NotehubClient is closed")
+        if (
+            not path
+            or path.startswith("/")
+            or "://" in path
+            or "#" in path
+            or "?" in path
+            or "\\" in path
+            or any(unquote(part) in {".", ".."} for part in path.split("/"))
+        ):
+            raise ValueError("path must be relative to /v1/; use params for query values")
+        if json is not None and data is not None:
+            raise ValueError("json and data are mutually exclusive")
         auth = await self._provider() if self._provider else self._token
-        request_headers = {"Authorization": f"Bearer {auth}", **(headers or {})}
-        url = path if path.startswith("https://") else f"{self._base_url}/v1/{path.lstrip('/')}"
+        auth = validate_bearer_token(auth)
+        request_headers = dict(headers or {})
+        if any(k.lower() == "authorization" for k in request_headers):
+            raise ValueError("Authentication is controlled by token or token_provider")
+        request_headers["Authorization"] = f"Bearer {auth}"
         try:
             response = await self._http.request(
-                method, url, params=params, json=json, content=data, headers=request_headers
+                method,
+                f"{self._base_url}/v1/{path}",
+                params=params,
+                json=json,
+                content=data,
+                headers=request_headers,
+                follow_redirects=False,
             )
-        except httpx.HTTPError as err:
-            raise NotehubTransportError(f"Notehub request failed: {err}") from err
-        if response.status_code == 204 or not response.content:
-            payload = None
-        else:
-            try:
-                payload = cast(JSONValue, response.json())
-            except ValueError:
-                payload = response.text
-        if response.is_error:
-            error = {
-                401: NotehubAuthenticationError,
-                403: NotehubPermissionError,
-                429: NotehubRateLimitError,
-            }.get(response.status_code, NotehubAPIError)
-            message = (
-                str(payload.get("message", payload)) if isinstance(payload, dict) else str(payload)
-            )
+        except httpx.HTTPError:
+            raise NotehubTransportError("Notehub transport failed") from None
+        if not 200 <= response.status_code < 300:
+            error_types: dict[int, type[NotehubAPIError]] = {
+                HTTPStatus.UNAUTHORIZED.value: NotehubAuthenticationError,
+                HTTPStatus.FORBIDDEN.value: NotehubPermissionError,
+                HTTPStatus.TOO_MANY_REQUESTS.value: NotehubRateLimitError,
+            }
+            error = error_types.get(response.status_code, NotehubAPIError)
             raise error(
                 response.status_code,
-                message,
-                payload=payload,
+                f"Notehub returned HTTP {response.status_code}",
                 retry_after=response.headers.get("Retry-After"),
             )
-        return payload
-
-    async def _pages(
-        self, path: str, *, params: dict[str, QueryValue] | None = None
-    ) -> AsyncIterator[JSONObject]:
-        query = {"pageSize": 100, "pageNum": 1, **(params or {})}
-        while True:
-            page = _object(await self.request("GET", path, params=query), "paginated")
-            if not isinstance(page, dict):
-                raise NotehubAPIError(
-                    200, "Expected a JSON object for a paginated response", payload=page
-                )
-            yield page
-            if not page.get("has_more"):
-                return
-            page_num = query.get("pageNum", 1)
-            query["pageNum"] = page_num + 1 if isinstance(page_num, int) else 2
-
-    async def iter_devices(self, project_uid: str) -> AsyncIterator[Device]:
-        async for page in self._pages(f"projects/{_q(project_uid)}/devices"):
-            for device in _object_list(page.get("devices"), "devices"):
-                if not isinstance(device, dict):
-                    continue
-                yield cast(Device, device)
-
-    async def get_devices(self, project_uid: str) -> list[Device]:
-        return [item async for item in self.iter_devices(project_uid)]
-
-    async def get_project_events(
-        self, project_uid: str, *, cursor: str | None = None, **filters: QueryValue
-    ) -> JSONObject:
-        params = {"pageSize": 100, **filters}
-        if cursor is not None:
-            params["cursor"] = cursor
-        payload = await self.request("GET", f"projects/{_q(project_uid)}/events", params=params)
-        if not isinstance(payload, dict):
-            raise NotehubAPIError(
-                200, "Expected an object from the events endpoint", payload=payload
-            )
-        return payload
-
-    async def iter_project_events(
-        self, project_uid: str, *, cursor: str = "0", **filters: QueryValue
-    ) -> AsyncIterator[Event]:
-        while True:
-            page = await self.get_project_events(project_uid, cursor=cursor, **filters)
-            for event in _object_list(page.get("events"), "events"):
-                if not isinstance(event, dict):
-                    continue
-                yield cast(Event, event)
-            next_cursor = page.get("next_cursor")
-            if not page.get("has_more"):
-                return
-            if not next_cursor or str(next_cursor) == str(cursor):
-                raise NotehubAPIError(
-                    200, "Event pagination cursor missing or did not advance", payload=page
-                )
-            cursor = str(next_cursor)
-
-    async def get_project(self, project_uid: str) -> JSONObject:
-        return _object(await self.request("GET", f"projects/{_q(project_uid)}"), "project")
-
-    async def get_projects(self, **params: QueryValue) -> JSONObject:
-        return _object(await self.request("GET", "projects", params=params), "projects")
-
-    async def add_qi_note(
-        self, project_uid: str, device_uid: str, notefile: str, body: JSONObject
-    ) -> JSONValue:
-        return await self.request(
-            "POST", f"{_device(project_uid, device_uid)}/notes/{_q(notefile)}", json={"body": body}
-        )
-
-    async def add_db_note(
-        self, project_uid: str, device_uid: str, notefile: str, note_id: str, body: JSONObject
-    ) -> JSONValue:
-        return await self.request(
-            "POST",
-            f"{_device(project_uid, device_uid)}/notes/{_q(notefile)}/{_q(note_id)}",
-            json={"body": body},
-        )
-
-    async def update_db_note(
-        self, project_uid: str, device_uid: str, notefile: str, note_id: str, body: JSONObject
-    ) -> JSONValue:
-        return await self.request(
-            "PUT",
-            f"{_device(project_uid, device_uid)}/notes/{_q(notefile)}/{_q(note_id)}",
-            json={"body": body},
-        )
-
-    async def delete_note(
-        self, project_uid: str, device_uid: str, notefile: str, note_id: str
-    ) -> JSONValue:
-        return await self.request(
-            "DELETE", f"{_device(project_uid, device_uid)}/notes/{_q(notefile)}/{_q(note_id)}"
-        )
-
-    async def set_environment_variables(
-        self, project_uid: str, device_uid: str, values: dict[str, str]
-    ) -> JSONValue:
-        return await self.request(
-            "PUT",
-            f"{_device(project_uid, device_uid)}/environment_variables",
-            json={"environment_variables": cast(JSONValue, values)},
-        )
-
-    async def delete_environment_variable(
-        self, project_uid: str, device_uid: str, key: str
-    ) -> JSONValue:
-        return await self.request(
-            "DELETE", f"{_device(project_uid, device_uid)}/environment_variables/{_q(key)}"
-        )
-
-
-def _q(value: str) -> str:
-    return quote(value, safe=":.#")
-
-
-def _device(project: str, device: str) -> str:
-    return f"projects/{_q(project)}/devices/{_q(device)}"
-
-
-def _object(payload: JSONValue, endpoint: str) -> JSONObject:
-    if not isinstance(payload, dict):
-        raise NotehubAPIError(
-            200, f"Expected a JSON object from the {endpoint} endpoint", payload=payload
-        )
-    return payload
-
-
-def _object_list(payload: JSONValue, field: str) -> list[JSONObject]:
-    if not isinstance(payload, list):
-        raise NotehubAPIError(
-            200, f"Expected a list in the {field} response field", payload=payload
-        )
-    return [item for item in payload if isinstance(item, dict)]
+        if response.status_code == 204 or not response.content:
+            return None
+        try:
+            return validate_json_value(response.json())
+        except ValueError:
+            raise NotehubResponseError("Notehub returned invalid JSON") from None

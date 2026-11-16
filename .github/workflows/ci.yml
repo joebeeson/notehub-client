@@ -14,8 +14,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --all-extras
-      - run: uv run pytest
-      - run: uv run ruff check .
-      - run: uv run mypy src
+      - run: uv sync --all-groups --all-extras
+      - run: uv run --no-sync pytest
+      - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync ruff format --check .
+      - run: uv run --no-sync pyrefly check
       - run: uv build
