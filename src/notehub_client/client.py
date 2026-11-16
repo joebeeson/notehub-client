@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import math
 from http import HTTPStatus
+from logging import getLogger
+from time import perf_counter
 from typing import TYPE_CHECKING
 from urllib.parse import unquote
 
@@ -43,6 +45,7 @@ if TYPE_CHECKING:
     TokenProvider = Callable[[], Awaitable[str]]
 
 BASE_URL = NOTEHUB_API_ORIGIN
+LOGGER = getLogger(__name__)
 
 
 class NotehubClient:
@@ -161,6 +164,7 @@ class NotehubClient:
         if any(k.lower() == "authorization" for k in request_headers):
             raise ValueError("Authentication is controlled by token or token_provider")
         request_headers["Authorization"] = f"Bearer {auth}"
+        started_at = perf_counter()
         try:
             response = await self._http.request(
                 method,
@@ -171,9 +175,27 @@ class NotehubClient:
                 headers=request_headers,
                 follow_redirects=False,
             )
-        except httpx.HTTPError:
+        except httpx.HTTPError as error:
+            LOGGER.warning(
+                "Notehub transport failed: method=%r path=%r error_type=%r duration_ms=%r",
+                method,
+                path,
+                type(error).__name__,
+                round((perf_counter() - started_at) * 1000, 1),
+            )
             raise NotehubTransportError("Notehub transport failed") from None
+        duration_ms = round((perf_counter() - started_at) * 1000, 1)
         if not 200 <= response.status_code < 300:
+            if response.status_code == HTTPStatus.TOO_MANY_REQUESTS or response.status_code >= 500:
+                LOGGER.warning(
+                    "Notehub API response failed: method=%r path=%r status_code=%r "
+                    "retry_after=%r duration_ms=%r",
+                    method,
+                    path,
+                    response.status_code,
+                    response.headers.get("Retry-After"),
+                    duration_ms,
+                )
             error_types: dict[int, type[NotehubAPIError]] = {
                 HTTPStatus.UNAUTHORIZED.value: NotehubAuthenticationError,
                 HTTPStatus.FORBIDDEN.value: NotehubPermissionError,
@@ -185,6 +207,13 @@ class NotehubClient:
                 f"Notehub returned HTTP {response.status_code}",
                 retry_after=response.headers.get("Retry-After"),
             )
+        LOGGER.debug(
+            "Notehub API response: method=%r path=%r status_code=%r duration_ms=%r",
+            method,
+            path,
+            response.status_code,
+            duration_ms,
+        )
         if response.status_code == 204 or not response.content:
             return None
         try:

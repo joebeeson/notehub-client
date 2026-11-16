@@ -11,7 +11,7 @@ from notehub_client.oauth import TOKEN_URL, NotehubOAuthTokenProvider
 
 
 def test_oauth_reports_missing_optional_dependency_at_feature_boundary() -> None:
-    with patch.dict("sys.modules", {"authlib": None}):
+    with patch.dict("sys.modules", {"authlib.integrations.httpx_client": None}):
         with pytest.raises(NotehubDependencyError) as captured:
             NotehubOAuthTokenProvider("client-id", "client-secret")
 

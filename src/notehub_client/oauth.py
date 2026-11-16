@@ -6,12 +6,14 @@ import asyncio
 import math
 import time
 from collections.abc import Mapping
+from logging import getLogger
 
 from .constants import NOTEHUB_API_ORIGIN
 from .errors import NotehubDependencyError, NotehubOAuthError
 from .helpers import validate_bearer_token
 
 TOKEN_URL = f"{NOTEHUB_API_ORIGIN}/oauth2/token"
+LOGGER = getLogger(__name__)
 
 
 class NotehubOAuthTokenProvider:
@@ -59,23 +61,38 @@ class NotehubOAuthTokenProvider:
             expires_at = (
                 float(expiry) if isinstance(expiry, (int, float)) and math.isfinite(expiry) else 0.0
             )
+            refreshed = False
             if token is None or expires_at <= time.time() + self._leeway:
                 try:
                     fetched = await self._client.fetch_token(
                         TOKEN_URL, grant_type="client_credentials"
                     )
-                except Exception:
+                except Exception as error:
+                    LOGGER.warning(
+                        "Notehub OAuth token exchange failed: error_type=%r",
+                        type(error).__name__,
+                    )
                     raise NotehubOAuthError("Notehub OAuth token request failed") from None
                 token = fetched if isinstance(fetched, Mapping) else None
+                refreshed = True
             access_token = token.get("access_token") if token is not None else None
             if not isinstance(access_token, str) or not access_token:
+                LOGGER.warning(
+                    "Notehub OAuth token response invalid: reason=%r", "missing_access_token"
+                )
                 raise NotehubOAuthError("Notehub OAuth response did not contain an access token")
             try:
-                return validate_bearer_token(access_token)
+                validated_token = validate_bearer_token(access_token)
             except ValueError:
+                LOGGER.warning(
+                    "Notehub OAuth token response invalid: reason=%r", "invalid_access_token"
+                )
                 raise NotehubOAuthError(
                     "Notehub OAuth response contained an invalid access token"
                 ) from None
+            if refreshed:
+                LOGGER.info("Notehub OAuth token refreshed: leeway_seconds=%r", self._leeway)
+            return validated_token
 
     async def aclose(self) -> None:
         """Close the OAuth HTTP client and prevent further token requests."""

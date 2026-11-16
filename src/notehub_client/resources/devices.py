@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+from logging import getLogger
 from typing import TYPE_CHECKING, cast
 
 from ..errors import NotehubResponseError
@@ -29,6 +30,8 @@ if TYPE_CHECKING:
         SessionResponse,
     )
     from .base import RequestClient
+
+LOGGER = getLogger(__name__)
 
 
 class DevicesFacade:
@@ -168,24 +171,38 @@ class DevicesFacade:
     ) -> JSONValue:
         """Set environment-variable values on a device."""
         variables: JSONObject = {k: v for k, v in values.items()}
-        return await self._client.request(
+        result = await self._client.request(
             "PUT",
             encode_path_segments(
                 "projects", project_uid, "devices", device_uid, "environment_variables"
             ),
             json={"environment_variables": variables},
         )
+        LOGGER.info(
+            "Device environment updated: project_uid=%r device_uid=%r value_count=%r",
+            project_uid,
+            device_uid,
+            len(values),
+        )
+        return result
 
     async def delete_environment_variable(
         self, project_uid: str, device_uid: str, key: str
     ) -> JSONValue:
         """Remove one environment-variable override from a device."""
-        return await self._client.request(
+        result = await self._client.request(
             "DELETE",
             encode_path_segments(
                 "projects", project_uid, "devices", device_uid, "environment_variables", key
             ),
         )
+        LOGGER.info(
+            "Device environment variable removed: project_uid=%r device_uid=%r variable_name=%r",
+            project_uid,
+            device_uid,
+            key,
+        )
+        return result
 
     async def list_for_fleet(
         self,
