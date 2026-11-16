@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-# TODO: Is this module and class getting a bit big for its britches?
-
 import math
 from http import HTTPStatus
 from logging import getLogger
@@ -44,6 +42,7 @@ if TYPE_CHECKING:
 
     TokenProvider = Callable[[], Awaitable[str]]
 
+# TODO: Is this module and class getting a bit big for its britches?
 BASE_URL = NOTEHUB_API_ORIGIN
 LOGGER = getLogger(__name__)
 

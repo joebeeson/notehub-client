@@ -93,7 +93,9 @@ def test_main_rejects_unknown_runtime_names(capsys: pytest.CaptureFixture[str]) 
         main(["web"])
 
     assert captured.value.code == 2
-    assert "choose from 'cli', 'tui'" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "invalid choice" in error
+    assert "web" in error
 
 
 @pytest.mark.parametrize(
