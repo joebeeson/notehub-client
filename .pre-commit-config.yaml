@@ -1,0 +1,34 @@
+default_language_version:
+  python: python3.11
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-added-large-files
+  - repo: local
+    hooks:
+      # TODO: Are these the right approach for testing?
+      - id: ruff-check
+        name: ruff check
+        entry: uv run --no-default-groups --group lint ruff check .
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: ruff-format
+        name: ruff format
+        entry: uv run --no-default-groups --group lint ruff format --check .
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: pyrefly
+        name: pyrefly
+        entry: uv run --no-default-groups --group type pyrefly check
+        language: system
+        types: [python]
+        pass_filenames: false
