@@ -1,0 +1,2 @@
+[notehub_client.simulate.behaviors]
+example.sensor = notehub_client.simulate.behaviors:sensor

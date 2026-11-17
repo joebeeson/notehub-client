@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ..constants import DEFAULT_PAGE_SIZE
-from ..typing.query import QueryValue
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from ..typing.query import QueryValue
 
 __all__ = ["CursorPagination", "Pagination", "cursor", "page"]
 
@@ -34,6 +38,10 @@ class Pagination:
     def __iter__(self) -> Iterator[tuple[str, QueryValue]]:
         return iter(self.to_query_params().items())
 
+    def __rich_repr__(self) -> Iterator[object]:
+        yield "page_size", self.page_size, DEFAULT_PAGE_SIZE
+        yield "page_num", self.page_num, None
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CursorPagination:
@@ -54,6 +62,10 @@ class CursorPagination:
 
     def __iter__(self) -> Iterator[tuple[str, QueryValue]]:
         return iter(self.to_query_params().items())
+
+    def __rich_repr__(self) -> Iterator[object]:
+        yield "cursor", self.cursor, "0"
+        yield "page_size", self.page_size, DEFAULT_PAGE_SIZE
 
 
 def page(page_size: int = DEFAULT_PAGE_SIZE, page_num: int | None = None) -> Pagination:

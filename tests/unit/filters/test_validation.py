@@ -30,9 +30,9 @@ def test_event_filter_validation(factory: Callable[[], object], message: str) ->
     ("factory", "message"),
     [
         pytest.param(
-            lambda: EventFilters(files=["sensors.qo"]),  # type: ignore[arg-type]
-            "tuple of nonempty strings",
-            id="list-instead-of-tuple",
+            lambda: EventFilters(files="sensors.qo"),
+            "sequence of nonempty strings",
+            id="string-instead-of-sequence",
         ),
         pytest.param(
             lambda: EventFilters(system_files_only=1),  # type: ignore[arg-type]
@@ -51,8 +51,13 @@ def test_event_filter_rejects_invalid_optional_fields(
 
 
 def test_device_filter_validation() -> None:
-    with pytest.raises(ValueError, match="tuple of nonempty strings"):
+    with pytest.raises(ValueError, match="only nonempty strings"):
         DeviceFilters(device_uids=("",))
+
+
+def test_event_filter_normalizes_list_values_to_tuples() -> None:
+    filters = EventFilters(files=["sensors.qo"])
+    assert filters.files == ("sensors.qo",)
 
 
 def test_balance_history_filter_validates_unix_timestamp_window() -> None:

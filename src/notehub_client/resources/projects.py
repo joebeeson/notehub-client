@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from ..filters import merge_query_params
@@ -10,6 +11,7 @@ from ..helpers import (
     require_collection,
     require_json_object,
 )
+from .devices import DeviceHandle, DevicesFacade
 
 if TYPE_CHECKING:
     from ..typing import (
@@ -24,8 +26,12 @@ if TYPE_CHECKING:
 class ProjectsFacade:
     """Operations for the projects domain."""
 
-    def __init__(self, client: RequestClient) -> None:
+    def __init__(self, client: RequestClient, *, devices: DevicesFacade | None = None) -> None:
         self._client = client
+        self._devices = devices if devices is not None else DevicesFacade(client)
+
+    def __getitem__(self, project_uid: str) -> ProjectHandle:
+        return ProjectHandle(project_uid, self, ProjectDevices(project_uid, self._devices))
 
     async def get(self, project_uid: str) -> Project:
         """Fetch a project by its UID."""
@@ -51,3 +57,22 @@ class ProjectsFacade:
                 optional=True,
             ),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectDevices:
+    project_uid: str
+    _devices: DevicesFacade
+
+    def __getitem__(self, device_uid: str) -> DeviceHandle:
+        return self._devices[self.project_uid, device_uid]
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectHandle:
+    project_uid: str
+    _projects: ProjectsFacade
+    devices: ProjectDevices
+
+    async def get(self) -> Project:
+        return await self._projects.get(self.project_uid)

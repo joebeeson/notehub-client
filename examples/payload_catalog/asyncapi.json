@@ -1,0 +1,47 @@
+{
+  "asyncapi": "3.1.0",
+  "info": {"title": "Temperature readings", "version": "2.0.0"},
+  "channels": {
+    "readings": {
+      "address": "readings.qo",
+      "messages": {
+        "readingV1": {"$ref": "#/components/messages/ReadingV1"},
+        "readingV2": {"$ref": "#/components/messages/ReadingV2"}
+      }
+    }
+  },
+  "components": {
+    "messages": {
+      "ReadingV1": {
+        "summary": "Legacy Fahrenheit readings",
+        "payload": {
+          "schemaFormat": "application/schema+json;version=draft-07",
+          "schema": {
+            "type": "object",
+            "required": ["schema_version", "fahrenheit"],
+            "properties": {
+              "schema_version": {"const": 1},
+              "fahrenheit": {"type": "number"}
+            }
+          }
+        },
+        "examples": [{"payload": {"schema_version": 1, "fahrenheit": 68}}]
+      },
+      "ReadingV2": {
+        "summary": "Celsius readings",
+        "payload": {
+          "schemaFormat": "application/schema+json;version=draft-07",
+          "schema": {
+            "type": "object",
+            "required": ["schema_version", "celsius"],
+            "properties": {
+              "schema_version": {"const": 2},
+              "celsius": {"type": "number"}
+            }
+          }
+        },
+        "examples": [{"payload": {"schema_version": 2, "celsius": 20}}]
+      }
+    }
+  }
+}

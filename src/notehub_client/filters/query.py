@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Self
+from typing import TYPE_CHECKING
 
 from ..constants import EventDateTypeWire, EventSortFieldWire, EventSortOrderWire
-from ..typing.query import (
-    EventDateTypeValue,
-    EventSortFieldValue,
-    EventSortOrderValue,
-    QueryFilter,
-    QueryValue,
-)
-from ._validation import _validate_dates
+from ..typing.query import QueryFilter, QueryValue
+from ._validation import _date_params, _normalize_select_fields
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
+    from datetime import datetime
+    from typing import Self
+
+    from ..typing.query import (
+        EventDateTypeValue,
+        EventSortFieldValue,
+        EventSortOrderValue,
+    )
 
 __all__ = [
     "Query",
@@ -90,6 +95,9 @@ class Query(Mapping[str, QueryValue]):
     def __len__(self) -> int:
         return len(self._items)
 
+    def __rich_repr__(self) -> Iterator[object]:
+        yield from self._items
+
     def to_query_params(self) -> dict[str, QueryValue]:
         """Return a mutable mapping suitable for an HTTP request."""
         return dict(self._items)
@@ -148,15 +156,13 @@ class Query(Mapping[str, QueryValue]):
         """Add event UIDs as repeated ``eventUID`` values."""
         return self._append("eventUID", *uids)
 
-    def date_range(self, start: int | None = None, end: int | None = None) -> Self:
-        """Set optional nonnegative Unix-timestamp bounds for event dates."""
-        _validate_dates(start, end)
-        updates: dict[str, QueryValue] = {}
-        if start is not None:
-            updates["startDate"] = start
-        if end is not None:
-            updates["endDate"] = end
-        return self._set(**updates)
+    def date_range(
+        self,
+        start: int | datetime | None = None,
+        end: int | datetime | None = None,
+    ) -> Self:
+        """Set optional Unix-second or timezone-aware datetime bounds for event dates."""
+        return self._set(**_date_params(start, end))
 
     def date_type(self, value: EventDateTypeWire | EventDateTypeValue) -> Self:
         """Set whether event dates are based on capture or upload time."""
@@ -176,11 +182,9 @@ class Query(Mapping[str, QueryValue]):
             raise ValueError("enabled must be a boolean")
         return self._set(systemFilesOnly=enabled)
 
-    def select_fields(self, value: str) -> Self:
-        """Set the comma-separated event fields requested from Notehub."""
-        if not value:
-            raise ValueError("select fields must be nonempty")
-        return self._set(selectFields=value)
+    def select_fields(self, value: str | Sequence[str]) -> Self:
+        """Set event fields as a comma-separated string or a sequence of names."""
+        return self._set(selectFields=_normalize_select_fields(value))
 
     def since(self, value: str) -> Self:
         """Set a Notehub cursor value for retrieving events changed since it."""
@@ -256,6 +260,8 @@ def events(*uids: str) -> Query:
     return Query().events(*uids)
 
 
-def date_range(start: int | None = None, end: int | None = None) -> Query:
-    """Create an event query with optional Unix-timestamp bounds."""
+def date_range(
+    start: int | datetime | None = None, end: int | datetime | None = None
+) -> Query:
+    """Create an event query with Unix-second or timezone-aware datetime bounds."""
     return Query().date_range(start, end)

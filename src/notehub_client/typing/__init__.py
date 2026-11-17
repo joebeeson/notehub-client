@@ -1,6 +1,17 @@
 """Public typing contracts for Notehub JSON, queries, and wire records."""
 
+from .compose import (
+    EnvironmentValueSource,
+    EnvironmentValuesSource,
+    IdentifierSource,
+    JSONValueSource,
+    NoteBodySource,
+    SecretValueSource,
+    TargetSource,
+)
+from .hosting import Component, EventSink
 from .json import JSONObject, JSONScalar, JSONValue
+from .observe import Observer
 from .query import (
     EventDateTypeValue,
     EventSortFieldValue,
@@ -9,6 +20,7 @@ from .query import (
     QueryScalar,
     QueryValue,
 )
+from .simulate import Behavior, BehaviorFactory, ScenarioSource
 from .wire import (
     AccountDetails,
     BalanceHistoryEntry,
@@ -64,12 +76,15 @@ __all__ = [
     "AccountDetails",
     "BalanceHistoryEntry",
     "BalanceHistoryResponse",
+    "Behavior",
+    "BehaviorFactory",
     "BillingAccount",
     "BillingAccountDetails",
     "BillingAccountRole",
     "BillingAccountsResponse",
     "BillingPlan",
     "CellularUsage",
+    "Component",
     "Contact",
     "DFUEnv",
     "DFUState",
@@ -80,8 +95,11 @@ __all__ = [
     "DeviceUsage",
     "DevicesResponse",
     "EmailNotification",
+    "EnvironmentValueSource",
+    "EnvironmentValuesSource",
     "Event",
     "EventDateTypeValue",
+    "EventSink",
     "EventSortFieldValue",
     "EventSortOrderValue",
     "EventsResponse",
@@ -92,14 +110,18 @@ __all__ = [
     "GetDeviceEnvironmentVariablesResponse",
     "GetJobsResponse",
     "HealthLog",
+    "IdentifierSource",
     "JSONObject",
     "JSONScalar",
     "JSONValue",
+    "JSONValueSource",
     "Job",
     "LatestResponse",
     "Location",
     "Monitor",
+    "NoteBodySource",
     "NotehubRouteSummary",
+    "Observer",
     "Organization",
     "OrganizationDetails",
     "OrganizationRole",
@@ -110,10 +132,13 @@ __all__ = [
     "QueryScalar",
     "QueryValue",
     "Role",
+    "ScenarioSource",
+    "SecretValueSource",
     "SessionResponse",
     "SimUsage",
     "SlackBearerNotification",
     "SlackWebHookNotification",
+    "TargetSource",
     "TowerLocation",
     "UsageApiData",
     "UsageApiResponse",

@@ -1,6 +1,7 @@
-"""Reusable authentication, path, and response helpers."""
+"""Reusable authentication, path, pacing, and response helpers."""
 
 from .auth import validate_bearer_token
+from .pacing import RequestPacer
 from .path import encode_path_segments
 from .response import (
     require_collection,
@@ -10,6 +11,7 @@ from .response import (
 )
 
 __all__ = [
+    "RequestPacer",
     "encode_path_segments",
     "require_collection",
     "require_device_collection",

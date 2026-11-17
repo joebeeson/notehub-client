@@ -1,0 +1,32 @@
+scenario_version = 1
+start_time = 2025-01-01T00:00:00Z
+
+[[projects]]
+uid = "app:demo"
+label = "Sensor demo"
+
+[[devices]]
+uid = "dev:temperature"
+project_uid = "app:demo"
+product_uid = "product:demo"
+
+[[events]]
+project_uid = "app:demo"
+device_uid = "dev:temperature"
+event = "evt:historic"
+file = "temperature.qo"
+received = 2025-01-01T00:00:00Z
+body = { celsius = 19 }
+
+[[outbound]]
+project_uid = "app:demo"
+device_uid = "dev:temperature"
+file = "temperature.qo"
+body = { celsius = 18 }
+
+[[inbound]]
+project_uid = "app:demo"
+device_uid = "dev:temperature"
+file = "commands.qi"
+body = { action = "wake" }
+

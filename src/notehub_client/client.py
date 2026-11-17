@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 from http import HTTPStatus
+from itertools import count
 from logging import getLogger
 from time import perf_counter
 from typing import TYPE_CHECKING
@@ -11,6 +13,7 @@ from urllib.parse import unquote
 
 import httpx
 
+from .compose import Composer
 from .constants import DEFAULT_TIMEOUT, NOTEHUB_API_ORIGIN
 from .errors import (
     NotehubAPIError,
@@ -20,7 +23,16 @@ from .errors import (
     NotehubResponseError,
     NotehubTransportError,
 )
-from .helpers import validate_bearer_token, validate_json_value
+from .helpers import RequestPacer, validate_bearer_token, validate_json_value
+from .observe import (
+    RequestCancelled,
+    RequestFailed,
+    RequestFinished,
+    RequestStarted,
+    active_operation,
+    notify,
+)
+from .payloads import PayloadDecoder
 from .resources import (
     BillingAccountsFacade,
     DevicesFacade,
@@ -36,13 +48,13 @@ from .resources import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Iterator, Mapping
 
     from .typing import JSONValue, QueryValue
+    from .typing.observe import Observer
 
     TokenProvider = Callable[[], Awaitable[str]]
 
-# TODO: Is this module and class getting a bit big for its britches?
 BASE_URL = NOTEHUB_API_ORIGIN
 LOGGER = getLogger(__name__)
 
@@ -67,8 +79,13 @@ class NotehubClient:
     monitors: MonitorsFacade
     usage: UsageFacade
 
-    # TODO: Should we check/fallback to like `environ["NOTEHUB_TOKEN"]` if it exists?
-    # TODO: I wonder if configuration is getting large enough to warrant its own handling.
+    def __rich_repr__(self) -> Iterator[object]:
+        yield "base_url", self._base_url
+        yield "authentication", "token_provider" if self._provider is not None else "token"
+        yield "closed", self._closed, False
+        if self._observer is not None:
+            yield "observer", type(self._observer).__name__
+
     def __init__(
         self,
         token: str | None = None,
@@ -77,6 +94,10 @@ class NotehubClient:
         http_client: httpx.AsyncClient | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         base_url: str = BASE_URL,
+        observer: Observer | None = None,
+        pacer: RequestPacer | None = None,
+        composer: Composer | None = None,
+        payloads: PayloadDecoder | None = None,
     ) -> None:
         if (token is None) == (token_provider is None):
             raise ValueError("Provide exactly one token or token_provider")
@@ -96,19 +117,24 @@ class NotehubClient:
             or base.fragment
         ):
             raise ValueError("base_url must be an HTTP(S) origin without credentials or query")
+        self.composer = (composer if composer is not None else Composer()).copy(frozen=True)
+        self.payloads = payloads.copy() if payloads is not None else PayloadDecoder()
         self._token = token
         self._provider = token_provider
         self._owns_http = http_client is None
         self._http = http_client if http_client is not None else httpx.AsyncClient(timeout=timeout)
         self._base_url = str(base).rstrip("/")
+        self._observer = observer
+        self._pacer = pacer
+        self._request_ids = count(1)
         self._closed = False
-        self.projects = ProjectsFacade(self)
-        self.devices = DevicesFacade(self)
-        self.events = EventsFacade(self)
+        self.devices = DevicesFacade(self, composer=self.composer)
+        self.projects = ProjectsFacade(self, devices=self.devices)
+        self.events = EventsFacade(self, payloads=self.payloads)
         self.fleets = FleetsFacade(self)
         self.organizations = OrganizationsFacade(self)
         self.billing_accounts = BillingAccountsFacade(self)
-        self.notes = NotesFacade(self)
+        self.notes = NotesFacade(self, composer=self.composer)
         self.routes = RoutesFacade(self)
         self.jobs = JobsFacade(self)
         self.monitors = MonitorsFacade(self)
@@ -140,7 +166,8 @@ class NotehubClient:
     ) -> JSONValue:
         """Request a relative /v1/ endpoint; return JSON or None for an empty response.
 
-        No retries or redirects are performed. API response bodies are not used in
+        No retries or redirects are performed. An optional pacer can delay requests.
+        API response bodies are not used in
         exception messages because they can echo credentials or application data.
         """
         if self._closed:
@@ -163,8 +190,15 @@ class NotehubClient:
         if any(k.lower() == "authorization" for k in request_headers):
             raise ValueError("Authentication is controlled by token or token_provider")
         request_headers["Authorization"] = f"Bearer {auth}"
+        observer = self._observer
+        request_id = next(self._request_ids) if observer is not None else None
+        operation = active_operation() if observer is not None else None
+        if request_id is not None:
+            notify(observer, RequestStarted(request_id, method, path, operation))
         started_at = perf_counter()
         try:
+            if self._pacer is not None:
+                await self._pacer.acquire()
             response = await self._http.request(
                 method,
                 f"{self._base_url}/v1/{path}",
@@ -174,17 +208,53 @@ class NotehubClient:
                 headers=request_headers,
                 follow_redirects=False,
             )
+        except asyncio.CancelledError:
+            duration_ms = round((perf_counter() - started_at) * 1000, 1)
+            if request_id is not None:
+                notify(
+                    observer,
+                    RequestCancelled(request_id, method, path, duration_ms, operation),
+                )
+            raise
         except httpx.HTTPError as error:
+            duration_ms = round((perf_counter() - started_at) * 1000, 1)
+            if request_id is not None:
+                notify(
+                    observer,
+                    RequestFailed(
+                        request_id,
+                        method,
+                        path,
+                        type(error).__name__,
+                        duration_ms,
+                        operation,
+                    ),
+                )
             LOGGER.warning(
                 "Notehub transport failed: method=%r path=%r error_type=%r duration_ms=%r",
                 method,
                 path,
                 type(error).__name__,
-                round((perf_counter() - started_at) * 1000, 1),
+                duration_ms,
             )
             raise NotehubTransportError("Notehub transport failed") from None
         duration_ms = round((perf_counter() - started_at) * 1000, 1)
+        if request_id is not None:
+            notify(
+                observer,
+                RequestFinished(
+                    request_id,
+                    method,
+                    path,
+                    response.status_code,
+                    duration_ms,
+                    200 <= response.status_code < 300,
+                    operation,
+                ),
+            )
         if not 200 <= response.status_code < 300:
+            if response.status_code == HTTPStatus.TOO_MANY_REQUESTS and self._pacer is not None:
+                await self._pacer.defer(response.headers.get("Retry-After"))
             if response.status_code == HTTPStatus.TOO_MANY_REQUESTS or response.status_code >= 500:
                 LOGGER.warning(
                     "Notehub API response failed: method=%r path=%r status_code=%r "

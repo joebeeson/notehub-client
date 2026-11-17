@@ -1,0 +1,25 @@
+scenario_version = 1
+
+[[projects]]
+uid = "app:demo"
+environment = { SAMPLE_INTERVAL = "300", REGION = "global" }
+
+[[fleets]]
+project_uid = "app:demo"
+uid = "fleet:z"
+label = "alpha"
+environment = { SAMPLE_INTERVAL = "60" }
+
+[[fleets]]
+project_uid = "app:demo"
+uid = "fleet:a"
+label = "Zulu"
+environment = { SAMPLE_INTERVAL = "120" }
+
+[[devices]]
+project_uid = "app:demo"
+uid = "dev:temperature"
+fleet_uids = ["fleet:a", "fleet:z"]
+environment = { SAMPLE_INTERVAL = "10" }
+defaults = { SAMPLE_INTERVAL = "900", FORMAT = "celsius" }
+

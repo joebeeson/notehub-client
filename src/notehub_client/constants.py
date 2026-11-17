@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Final, Literal
 if TYPE_CHECKING:
     from .typing.query import EventDateTypeValue, EventSortFieldValue, EventSortOrderValue
 
-# TODO: Perhaps these (constants) should live closer to where they are used? Unless they're shared?
 NOTEHUB_API_ORIGIN: Final[str] = "https://api.notefile.net"
 DEFAULT_TIMEOUT: Final[float] = 30.0
 DEFAULT_PAGE_SIZE: Final[int] = 100

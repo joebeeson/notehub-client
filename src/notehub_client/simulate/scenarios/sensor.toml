@@ -1,0 +1,23 @@
+scenario_version = 1
+start_time = 2025-01-01T00:00:00Z
+
+[[projects]]
+uid = "app:demo"
+label = "Sensor workshop"
+
+[[devices]]
+project_uid = "app:demo"
+uid = "dev:temperature"
+readings = { temperature = 20.0, voltage = 3.7 }
+
+[[behaviors]]
+project_uid = "app:demo"
+device_uid = "dev:temperature"
+name = "sensor"
+config = { temperature = 20.0, drift = 0.1, noise = 0.02 }
+
+[[inbound]]
+project_uid = "app:demo"
+device_uid = "dev:temperature"
+file = "commands.qi"
+body = { set_temperature = 22.0 }

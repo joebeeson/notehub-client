@@ -1,0 +1,121 @@
+scenario_version = 1
+start_time = 2026-11-17T14:00:00Z
+
+[[projects]]
+uid = "app:coastal-field-lab"
+label = "Coastal sensor field lab"
+environment = { REPORT_INTERVAL = "300", REGION = "north-shore", ALERT_TEMP_C = "16" }
+
+[[fleets]]
+project_uid = "app:coastal-field-lab"
+uid = "fleet:nearshore"
+label = "Nearshore buoys"
+environment = { REPORT_INTERVAL = "120" }
+
+[[fleets]]
+project_uid = "app:coastal-field-lab"
+uid = "fleet:offshore"
+label = "Offshore station"
+environment = { REPORT_INTERVAL = "600", SATELLITE_LINK = "true" }
+
+[[devices]]
+project_uid = "app:coastal-field-lab"
+uid = "dev:buoy-north"
+fleet_uids = ["fleet:nearshore"]
+serial_number = "BUOY-NORTH-014"
+product_uid = "product:coastal-watch"
+defaults = { REPORT_INTERVAL = "900", UNITS = "celsius" }
+readings = { temperature = 12.4, voltage = 3.91, turbidity = 1.8 }
+
+[[devices]]
+project_uid = "app:coastal-field-lab"
+uid = "dev:buoy-south"
+fleet_uids = ["fleet:nearshore"]
+serial_number = "BUOY-SOUTH-022"
+product_uid = "product:coastal-watch"
+defaults = { REPORT_INTERVAL = "900", UNITS = "celsius" }
+readings = { temperature = 14.1, voltage = 3.72, turbidity = 2.6 }
+
+[[devices]]
+project_uid = "app:coastal-field-lab"
+uid = "dev:station-offshore"
+fleet_uids = ["fleet:offshore"]
+serial_number = "STATION-OFFSHORE-003"
+product_uid = "product:coastal-watch"
+defaults = { REPORT_INTERVAL = "1800", UNITS = "celsius" }
+readings = { temperature = 10.7, voltage = 4.02 }
+
+[[events]]
+project_uid = "app:coastal-field-lab"
+device_uid = "dev:buoy-north"
+event = "evt:north-001"
+file = "temperature.qo"
+when = 2026-11-17T13:50:00Z
+received = 2026-11-17T13:50:04Z
+sensor = "sensor:water-temp-north"
+session = "session:morning-check"
+body = { celsius = 12.2, voltage = 3.94, depth_m = 4.5 }
+
+[[events]]
+project_uid = "app:coastal-field-lab"
+device_uid = "dev:buoy-south"
+event = "evt:south-001"
+file = "temperature.qo"
+when = 2026-11-17T13:46:00Z
+received = 2026-11-17T13:46:31Z
+sensor = "sensor:water-temp-south"
+session = "session:morning-check"
+body = { celsius = 13.8, voltage = 3.75, depth_m = 5.2 }
+
+[[events]]
+project_uid = "app:coastal-field-lab"
+device_uid = "dev:station-offshore"
+event = "evt:offshore-001"
+file = "station.qo"
+when = 2026-11-17T13:35:00Z
+received = 2026-11-17T13:43:12Z
+sensor = "sensor:offshore-array"
+session = "session:satellite-window"
+body = { celsius = 10.4, voltage = 4.06, turbidity = 1.1, link = "satellite" }
+
+[[outbound]]
+project_uid = "app:coastal-field-lab"
+device_uid = "dev:buoy-north"
+file = "temperature.qo"
+body = { celsius = 12.4, voltage = 3.91, depth_m = 4.5 }
+
+[[outbound]]
+project_uid = "app:coastal-field-lab"
+device_uid = "dev:station-offshore"
+file = "station.qo"
+body = { celsius = 10.7, voltage = 4.02, link = "satellite" }
+
+[[inbound]]
+project_uid = "app:coastal-field-lab"
+device_uid = "dev:buoy-north"
+file = "commands.qi"
+body = { set_temperature = 13.0, ticket = "OPS-482" }
+
+[[inbound]]
+project_uid = "app:coastal-field-lab"
+device_uid = "dev:buoy-south"
+file = "commands.qi"
+body = { action = "sample_now", reason = "warming trend" }
+
+[[behaviors]]
+project_uid = "app:coastal-field-lab"
+device_uid = "dev:buoy-north"
+name = "sensor"
+config = { temperature = 12.4, voltage = 3.91, drift = 0.04, noise = 0.12, notefile = "temperature.qo" }
+
+[[behaviors]]
+project_uid = "app:coastal-field-lab"
+device_uid = "dev:buoy-south"
+name = "sensor"
+config = { temperature = 14.1, voltage = 3.72, drift = -0.02, noise = 0.18, notefile = "temperature.qo" }
+
+[[behaviors]]
+project_uid = "app:coastal-field-lab"
+device_uid = "dev:station-offshore"
+name = "sensor"
+config = { temperature = 10.7, voltage = 4.02, drift = 0.01, noise = 0.05, notefile = "station.qo" }

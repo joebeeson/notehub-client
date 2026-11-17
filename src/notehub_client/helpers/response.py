@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 from ..errors import NotehubResponseError
-from ..typing import JSONObject, JSONValue
+
+if TYPE_CHECKING:
+    from ..typing import JSONObject, JSONValue
 
 __all__ = [
     "require_collection",

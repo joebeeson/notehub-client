@@ -1,0 +1,15 @@
+scenario_version = 1
+
+[[projects]]
+uid = "app:demo"
+
+[[devices]]
+project_uid = "app:demo"
+uid = "dev:temperature"
+readings = { temperature = 10.0 }
+
+[[behaviors]]
+project_uid = "app:demo"
+device_uid = "dev:temperature"
+name = "local"
+config = { temperature = 10.0, drift = 0.5 }

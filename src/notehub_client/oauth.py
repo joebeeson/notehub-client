@@ -6,11 +6,16 @@ import asyncio
 import math
 import time
 from collections.abc import Mapping
+from datetime import timedelta
 from logging import getLogger
+from typing import TYPE_CHECKING
 
 from .constants import NOTEHUB_API_ORIGIN
 from .errors import NotehubDependencyError, NotehubOAuthError
 from .helpers import validate_bearer_token
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 TOKEN_URL = f"{NOTEHUB_API_ORIGIN}/oauth2/token"
 LOGGER = getLogger(__name__)
@@ -20,14 +25,27 @@ class NotehubOAuthTokenProvider:
     """Fetch and renew Notehub project OAuth bearer tokens on demand.
 
     Concurrent requests share a token refresh. ``leeway`` causes renewal to
-    begin before the token's reported expiration time.
+    begin before the token's reported expiration time. Supply it as seconds or
+    a :class:`datetime.timedelta`.
     """
 
-    def __init__(self, client_id: str, client_secret: str, *, leeway: int = 60) -> None:
+    def __init__(
+        self,
+        client_id: str,
+        client_secret: str,
+        *,
+        leeway: int | timedelta = 60,
+    ) -> None:
         if not client_id or not client_secret:
             raise ValueError("client_id and client_secret must be nonempty")
-        if type(leeway) is not int or leeway < 0:
-            raise ValueError("leeway must be a nonnegative integer")
+        if isinstance(leeway, timedelta):
+            leeway_seconds = leeway.total_seconds()
+        elif type(leeway) is int:
+            leeway_seconds = leeway
+        else:
+            raise ValueError("leeway must be nonnegative seconds or a timedelta")
+        if leeway_seconds < 0:
+            raise ValueError("leeway must be nonnegative seconds or a timedelta")
         try:
             from authlib.integrations.httpx_client import AsyncOAuth2Client
         except ModuleNotFoundError as error:
@@ -35,11 +53,18 @@ class NotehubOAuthTokenProvider:
                 raise
             raise NotehubDependencyError("OAuth client credentials", "oauth", "authlib") from error
         self._client = AsyncOAuth2Client(
-            client_id, client_secret, token_endpoint_auth_method="client_secret_post"
+            client_id,
+            client_secret,
+            # This selects OAuth client-secret transport; it is a protocol constant, not a credential.
+            token_endpoint_auth_method="client_secret_post",  # noqa: S106  # nosec B106
         )
-        self._leeway = leeway
+        self._leeway = leeway_seconds
         self._lock = asyncio.Lock()
         self._closed = False
+
+    def __rich_repr__(self) -> Iterator[object]:
+        yield "leeway_seconds", self._leeway, 60
+        yield "closed", self._closed, False
 
     async def __aenter__(self) -> NotehubOAuthTokenProvider:
         if self._closed:

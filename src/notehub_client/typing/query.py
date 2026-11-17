@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Literal, Protocol, TypeAlias, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, runtime_checkable
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 QueryScalar: TypeAlias = str | int | float | bool
 QueryValue: TypeAlias = QueryScalar | list[str] | tuple[str, ...]

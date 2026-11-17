@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from ..typing.json import JSONValue
-from ..typing.query import QueryValue
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from ..typing.json import JSONValue
+    from ..typing.query import QueryValue
 
 
 @runtime_checkable

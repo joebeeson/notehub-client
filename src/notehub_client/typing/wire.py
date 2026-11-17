@@ -38,12 +38,12 @@ class Device(TypedDict):
     serial_number: NotRequired[str]
     sku: NotRequired[str]
     tags: NotRequired[str]
-    temperature: float
+    temperature: NotRequired[float]
     tower_info: NotRequired[JSONObject]
     tower_location: NotRequired[Location]
     triangulated_location: NotRequired[Location]
     uid: str
-    voltage: float
+    voltage: NotRequired[float]
 
 
 class Event(TypedDict):
@@ -229,14 +229,14 @@ class Job(TypedDict):
 class Monitor(TypedDict):
     """Monitor configuration and optional alert-routing details."""
 
-    aggregate_function: NotRequired[Literal["none", "avg", "max", "min", "sum", "count"]]
+    aggregate_function: NotRequired[Literal["none", "avg", "max", "min", "sum", "count"]]  # TODO: Might want to pull this literal up
     aggregate_window: NotRequired[str]
     alert: NotRequired[bool]
     alert_routes: NotRequired[
-        list[SlackWebHookNotification | SlackBearerNotification | EmailNotification]
+        list[SlackWebHookNotification | SlackBearerNotification | EmailNotification]  # TODO: Another possible pull up
     ]
     condition_type: NotRequired[
-        Literal[
+        Literal[  # TODO: Possible pull up
             "greater_than",
             "greater_than_or_equal_to",
             "less_than",
@@ -255,7 +255,7 @@ class Monitor(TypedDict):
     routing_cooldown_period: NotRequired[str]
     silenced: NotRequired[bool]
     source_selector: NotRequired[str]
-    source_type: NotRequired[Literal["event", "heartbeat", "usage"]]
+    source_type: NotRequired[Literal["event", "heartbeat", "usage"]]  # TODO: Maybe pull up
     threshold: NotRequired[float]
     uid: NotRequired[str]
     usage_scope: NotRequired[str]

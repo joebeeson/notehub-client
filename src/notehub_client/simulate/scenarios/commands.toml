@@ -1,0 +1,21 @@
+scenario_version = 1
+
+[[projects]]
+uid = "app:demo"
+
+[[devices]]
+project_uid = "app:demo"
+uid = "dev:temperature"
+
+[[inbound]]
+project_uid = "app:demo"
+device_uid = "dev:temperature"
+file = "commands.qi"
+body = { action = "sample", count = 5 }
+
+[[device_inbound]]
+project_uid = "app:demo"
+device_uid = "dev:temperature"
+file = "commands.qi"
+body = { action = "wake" }
+

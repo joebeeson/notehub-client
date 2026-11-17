@@ -3,24 +3,31 @@
 from __future__ import annotations
 
 import builtins
-from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
+from ..catalog import ContractKey
 from ..constants import DEFAULT_PAGE_SIZE
 from ..errors import NotehubResponseError
 from ..filters import CursorPagination, merge_query_params
 from ..helpers import encode_path_segments, require_collection
+from ..payloads import DecodedEvent, PayloadDecoder
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from ..typing import Event, EventsResponse, QueryFilter, QueryValue
     from .base import RequestClient
+
+
+T = TypeVar("T")
 
 
 class EventsFacade:
     """Operations for project and fleet event collections."""
 
-    def __init__(self, client: RequestClient) -> None:
+    def __init__(self, client: RequestClient, *, payloads: PayloadDecoder | None = None) -> None:
         self._client = client
+        self._payloads = payloads if payloads is not None else PayloadDecoder()
 
     async def list(
         self,
@@ -71,6 +78,20 @@ class EventsFacade:
                 )
             seen.add(next_cursor)
             current = CursorPagination(cursor=next_cursor, page_size=current.page_size)
+
+    async def iter_decoded(
+        self,
+        project_uid: str,
+        *,
+        as_type: type[T],
+        contract: ContractKey | None = None,
+        filters: QueryFilter | None = None,
+        pagination: CursorPagination | None = None,
+        **params: QueryValue,
+    ) -> AsyncIterator[DecodedEvent[T]]:
+        """Decode each event explicitly, propagating selection and conversion failures."""
+        async for event in self.iter(project_uid, filters=filters, pagination=pagination, **params):
+            yield self._payloads.decode(event, as_type=as_type, contract=contract)
 
     async def collect(
         self,

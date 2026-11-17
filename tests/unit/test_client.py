@@ -88,7 +88,7 @@ async def test_external_http_client_lifecycle() -> None:
 async def test_async_token_provider() -> None:
     provider = AsyncMock(return_value="oauth-token")
     transport = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda req: httpx.Response(200, json={"uid": "app:x"}))
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"uid": "app:x"}))
     )
     async with NotehubClient(token_provider=provider, http_client=transport) as client:
         await client.projects.get("app:x")

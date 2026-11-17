@@ -1,0 +1,23 @@
+catalog_version = 1
+
+[[contracts]]
+id = "reading"
+version = "1"
+binding = "reading.v1"
+message_ref = "asyncapi.json#/components/messages/ReadingV1"
+[contracts.selector]
+product = "product:example"
+file = "readings.qo"
+discriminator = "/body/schema_version"
+value = 1
+
+[[contracts]]
+id = "reading"
+version = "2"
+binding = "reading.v2"
+message_ref = "asyncapi.json#/components/messages/ReadingV2"
+[contracts.selector]
+product = "product:example"
+file = "readings.qo"
+discriminator = "/body/schema_version"
+value = 2
