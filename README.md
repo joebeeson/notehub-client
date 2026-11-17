@@ -1,18 +1,31 @@
-# notehub-client
+﻿# notehub-client
 
-An unofficial asynchronous Python client for the Blues Notehub REST API. It uses HTTPX, supports Personal Access Tokens and asynchronous token providers, and keeps API response data available as typed dictionaries without requiring a large runtime model layer.
+### Your devices have stories to tell. Make something with them.
 
-## Installation
+Turn a week's sensor readings into a report. Give a remote device its next assignment. Explore your fleet from a terminal, a browser, or your own Python app.
 
-The package is being prepared for PyPI. Until it is published, install from GitHub:
+**An async Python client for [Blues Notehub](https://blues.com/products/notehub/), with a CLI, terminal workbench, local web dashboard, and MCP tools for your assistant.**
+
+[**Get started →**](#get-started) · [Explore the Wiki](https://github.com/joebeeson/notehub-client/wiki) · [Ideas & issues](https://github.com/joebeeson/notehub-client/issues)
+
+| 🐍 Build in Python | 🖥️ Explore your fleet | 🤖 Connect your assistant |
+| :--- | :--- | :--- |
+| Query events, work with devices, and send notes from your application. | Explore from a terminal or browser, or take the CLI into your scripts. | Give an MCP host read-only access to projects, devices, sessions, and events. |
+
+[//]: # (Maybe a tip could be a PEP-723 kinda script; once we have a PyPi release)
+
+## Get started
+
+Python **3.11+**, a Notehub project, and a Personal Access Token are all you need for the Python client. Install the current development version from GitHub:
 
 ```console
 pip install "notehub-client @ git+https://github.com/joebeeson/notehub-client.git"
 ```
 
-Create a Personal Access Token in Notehub's API Access settings and grant only the project roles and permissions your application needs. Keep tokens in a secret manager or environment variable.
+> [!TIP]
+> **Already using uv?** Run `uv add git+https://github.com/joebeeson/notehub-client`. Add `--branch branch-name` to try a particular branch.
 
-## Quick start
+Set `NOTEHUB_TOKEN` in your environment, replace the project UID, and meet your devices:
 
 ```python
 import asyncio
@@ -22,177 +35,172 @@ from notehub_client import NotehubClient
 
 
 async def main() -> None:
-    async with NotehubClient(os.environ["NOTEHUB_TOKEN"]) as client:
-        devices = await client.devices.collect("app:your-project-uid")
-        for device in devices:
+    async with NotehubClient(os.environ["NOTEHUB_TOKEN"]) as notehub:
+        async for device in notehub.devices.iter("app:your-project-uid"):
             print(device["uid"], device.get("last_activity"))
-
-        async for event in client.events.iter("app:your-project-uid"):
-            print(event.get("device"), event.get("file"), event.get("body"))
 
 
 asyncio.run(main())
 ```
 
-`NotehubClient` creates and closes its own `httpx.AsyncClient`. Supply `http_client=` to share a configured HTTPX client; the library will leave caller-supplied clients open. The client itself is an async context manager and can also be closed with `await client.aclose()`.
+[Need a hand with authentication? →](https://github.com/joebeeson/notehub-client/wiki/Installation-and-Authentication)
 
-## Authentication
+## Make something
 
-### Personal Access Token
+### Try it without hardware or credentials
 
-Pass the token to `NotehubClient(token)`. The client adds it as a Bearer token to API requests. Authentication headers cannot be overridden through the generic request method.
+Start a local Notecard workflow with `simulate.named("telemetry").start()`, then
+use ordinary client calls through `async with simulation.client() as notehub:`.
+Packaged TOML scenarios cover telemetry, inbound commands, environment inheritance,
+and a seeded sensor model. Bind callable device behaviors in Python or by name in
+TOML, then `step()` them to generate readings, queue Notes, and handle commands.
+[Explore simulation examples →](docs/simulation.md)
 
-### OAuth client credentials
+### Host an application controller
 
-Install the optional dependency with `pip install "notehub-client[oauth]"`. The Authlib-backed provider uses Notehub's form-encoded client-credentials exchange and renews tokens before the server-provided expiry:
+Give a configured async component a managed event stream, the shared client and
+payload decoder, and an output sink. [Run the local pivot irrigation example →](docs/hosting.md)
+
+The Python snippets below go inside the open `notehub` context above.
+
+### A week's readings, a few lines of Python
+
+One sensor. One Notefile. The last seven days. Pick the data you want with readable, composable filters:
 
 ```python
-from notehub_client import NotehubClient
-from notehub_client.oauth import NotehubOAuthTokenProvider
+from datetime import datetime, timedelta, timezone
 
-provider = NotehubOAuthTokenProvider(
-    client_id="your-client-id",
-    client_secret="your-client-secret",
+from notehub_client import filters
+
+readings = (
+    filters.devices("dev:your-sensor-uid")
+    .files("temperature.qo")
+    .date_range(start=datetime.now(timezone.utc) - timedelta(days=7))
 )
-try:
-    async with NotehubClient(token_provider=provider) as client:
-        project = await client.projects.get("app:your-project-uid")
-finally:
-    await provider.aclose()
+
+async for event in notehub.events.iter("app:your-project-uid", filters=readings):
+    print(event.get("body"))
 ```
 
-The provider serializes token renewal so concurrent requests share one token exchange. Alternatively, pass any async callable that returns a nonempty bearer token as `token_provider=`. Keep an externally supplied provider alive for as long as the client uses it.
+Feed those readings into a chart, an alert, or tomorrow's report. The client follows the pages while your code handles the data. [Explore event queries →](https://github.com/joebeeson/notehub-client/wiki/Events-and-Cursors)
 
-## Filters and pagination
+Know what those payloads represent? Add a [payload catalog](docs/payload-catalog.md) to bind AsyncAPI contracts to your Python types. Decode events explicitly, keep the original wire data, and use upgrade hooks to bring older readings into your current domain model. The [complete example](examples/payload_catalog/readings.py) runs locally with two payload versions and optional sample validation.
 
-Built-in immutable query objects implement the `QueryFilter` protocol and can be combined with explicit keyword parameters:
+### Send the next assignment
 
-```python
-from notehub_client import NotehubClient, filters
-
-async with NotehubClient(token) as client:
-    first_page = await client.devices.list(
-        "app:your-project-uid",
-        filters=filters.DeviceFilters(fleet_uids=("fleet:your-fleet-uid",)),
-        pagination=filters.page(page_size=100, page_num=1),
-    )
-
-    recent = await client.events.list(
-        "app:your-project-uid",
-        filters=filters.EventFilters(
-            files=("sensors.qo",),
-            device_uids=("dev:your-device-uid",),
-            start_date=1_735_689_600,
-            date_type="captured",
-            sort_order="asc",
-        ),
-    )
-
-    account_history = await client.billing_accounts.balance_history(
-        "billing:your-account-uid",
-        filters=filters.BalanceHistoryFilters(start_date=1_735_689_600),
-    )
-```
-
-Array filters are sent as repeated query keys, while `files` is serialized as Notehub's comma-separated value. A small application-specific object can implement `to_query_params()` and return a mapping; see the runtime-checkable `QueryFilter` protocol and `QueryValue` in `notehub_client.typing.query`. Duplicate keys between a filter and explicit parameters raise `ValueError` rather than silently overriding a value.
-
-Event date and sort enums are available through the root `constants` module. Filters accept either their string values or the corresponding enums:
+Your application can queue instructions for a device or change an environment setting it knows how to use:
 
 ```python
-from notehub_client import constants, filters
-
-filters = filters.EventFilters(
-    date_type=constants.EventDateTypeWire.CAPTURED,
-    sort_by=constants.EventSortFieldWire.DEVICE_UID,
-    sort_order=constants.EventSortOrderWire.ASC,
+await notehub.notes.add_qi(
+    "app:your-project-uid",
+    "dev:your-device-uid",
+    "commands.qi",
+    {"action": "sample", "samples": 10},
 )
-```
 
-Compose immutable query values with filter factories and fluent methods:
-
-```python
-from notehub_client import constants, filters
-
-selection = (
-    filters.devices("dev:your-device-uid")
-    .files("sensors.qo")
-    .date_range(start=1_735_689_600)
-    .date_type(constants.EventDateTypeWire.CAPTURED)
-    .sort_by(constants.EventSortFieldWire.DEVICE_UID)
-    .sort_order(constants.EventSortOrderWire.ASC)
+await notehub.devices.set_environment(
+    "app:your-project-uid",
+    "dev:your-device-uid",
+    {"SAMPLE_INTERVAL": "60"},
 )
+
+card = notehub.devices["app:your-project-uid", "dev:your-device-uid"]
+# Or bind a device through its project.
+card = notehub.projects["app:your-project-uid"].devices["dev:your-device-uid"]
+async with card.environment.edit() as environment:
+    environment["SAMPLE_INTERVAL"] = "120"
+# The edit context reads on entry and writes the changed keys when it exits normally.
 ```
 
-`filters.combine(...)` combines independent query components and rejects duplicate wire keys. Direct immutable filter models remain available for endpoint-specific fields.
+Your firmware defines what these instructions mean and picks them up when the device synchronizes. [Work with notes and environment variables →](https://github.com/joebeeson/notehub-client/wiki/Notes-and-Environment)
 
-`DEFAULT_PAGE_SIZE`, `DEFAULT_TIMEOUT`, and `NOTEHUB_API_ORIGIN` are available from `notehub_client.constants` and the root `constants` module.
+### From a quick look to a useful export
 
-`devices.iter()` and `events.iter()` request pages lazily; `devices.collect()` and `events.collect()` materialize all matching items. Use `events.list()` when you need to persist a resume cursor: its envelope includes Notehub's `next_cursor`. Pass `filters.cursor(value)` as `pagination=` to resume `events.iter()`. Event iteration defaults to cursor `"0"` and detects missing or nonadvancing cursors when Notehub says more events remain. Device iteration uses Notehub's page-number pagination.
-
-## API operations
-
-The package provides named operations for common project and device reads, event pagination, Notes, and device environment variables. Domain facades group named operations under `client.projects`, `client.devices`, `client.events`, `client.fleets`, `client.organizations`, `client.billing_accounts`, `client.notes`, `client.routes`, `client.jobs`, `client.monitors`, and `client.usage`. The current named convenience methods are:
-
-| API area | Named operations |
-| --- | --- |
-| Projects | `projects.get()`, `projects.list()` |
-| Devices | `devices.list()`, `devices.iter()`, `devices.collect()`, `devices.get()`, `devices.list_sessions()`, `devices.latest()`, `devices.get_environment()` |
-| Events | `events.list()`, `events.iter()`, `events.list_for_fleet()` |
-| Notes | `notes.add_qi()`, `notes.add_db()`, `notes.update_db()`, `notes.delete()` |
-| Fleets | `fleets.list()`, `devices.list_for_fleet()` |
-| Organizations | `organizations.list()`, `organizations.get()`, `organizations.balance_history()` |
-| Billing | `billing_accounts.list()`, `billing_accounts.get()`, `billing_accounts.balance_history()` |
-| Routes, jobs, monitors, usage | `routes.list()`, `jobs.list()`, `monitors.list()`, `usage.get()` |
-| Device environment | `devices.set_environment()`, `devices.delete_environment_variable()` |
-
-The named operations do not yet wrap every operation in Blues' API specification. Use `client.request(method, path, ...)` for other documented endpoints beneath `/v1/`; pass a relative path such as `projects/app:your-project-uid/fleets`. It returns `JSONValue` (a recursive JSON type) or `None` for an empty response. Named read methods return `TypedDict` contracts from `notehub_client.typing` and validate the response envelope before returning it.
-
-## Reusable helpers
-
-The supported helpers live in `notehub_client.helpers`; import the helper module from the package root. They can help when implementing custom operations with `client.request`:
-
-```python
-from notehub_client import filters, helpers
-
-path = helpers.encode_path_segments("projects", project_uid, "devices", device_uid)
-params = filters.page(page_size=100).to_query_params()
-payload = await client.request("GET", path, params=params)
-```
-
-| Helper | Behavior |
-| --- | --- |
-| `validate_bearer_token(value)` | Returns a valid Bearer token or raises `ValueError`. |
-| `encode_path_segments(*segments)` | Encodes identifiers as path segments; empty and dot segments raise `ValueError`. |
-
-| `validate_json_value(payload, context="response")` | Validates recursive JSON values and finite numbers; malformed values raise `errors.NotehubResponseError`. |
-| `require_json_object(payload, context)` | Requires a JSON object. |
-| `require_collection(payload, key, *, paginated=False, optional=False)` | Validates a collection envelope and optional pagination fields. |
-| `require_device_collection(payload, *, paginated=True)` | Validates a device collection, including each device's string `uid`. |
-
-The response helpers raise `errors.NotehubResponseError` for malformed data. Type aliases and response shapes used by these helpers are available from `notehub_client.typing`.
-
-Notes and environment-variable writes report whether Notehub accepted the API request. They do not confirm that a device has synchronized or applied the change; device connectivity and synchronization schedules affect when that happens.
-
-## Errors, rate limits, and request behavior
-
-The client raises `errors.NotehubAuthenticationError`, `errors.NotehubPermissionError`, and `errors.NotehubRateLimitError` for HTTP 401, 403, and 429 responses. Other non-success responses use `errors.NotehubAPIError`; inspect `status_code` and `retry_after`. Transport failures raise `errors.NotehubTransportError`, and malformed success responses raise `errors.NotehubResponseError`. Raw response bodies and transport details are not included in exception messages, which avoids leaking credentials or application data.
-
-Requests have a 30-second default timeout, do not follow redirects, and are never retried automatically. Implement retry and backoff at the call site, honoring `Retry-After` for rate limits. Each page is a separate API request. Notehub's free API request threshold is shared across projects on a billing account, so account for other clients when setting polling frequency. Check Blues' current [Notehub API reference](https://dev.blues.io/api-reference/notehub-api/) for permissions and request limits.
-
-## Command line scaffold
-
-Install `pip install "notehub-client[cli]"` to use the `notehub` console script, `notehub-client cli`, or `python -m notehub_client.runtimes.cli`. The Click group is intentionally an empty scaffold; CLI commands will be designed separately. Rich is included for future terminal output.
-
-The `notehub-client` dispatcher accepts a runtime name before its arguments. Install `pip install "notehub-client[tui]"` to add Textual and the CLI dependencies, then start the TUI with `notehub-client tui` or `notehub-client-tui`. The TUI runtime is scaffolded but does not yet provide an interface. Missing optional dependencies produce an install hint for the corresponding extra. The base library does not import runtime dependencies unless a runtime is started.
-
-## Development
+Find a project, check its devices, then export a thousand events for your next analysis:
 
 ```console
-just install
-just check
-just build
+notehub projects list
+notehub --project app:your-project-uid devices list
+notehub --project app:your-project-uid events export --limit 1000 > events.ndjson
 ```
 
-Tooling is split into `dev`, `lint`, `test`, and `type` uv dependency groups. The `type` group includes `test` because Pyrefly checks both `src` and `tests`. `just prek` runs the configured file hygiene, lint, format, and type hooks across the repository.
+Want to browse? Open the local dashboard and move between projects, fleets, devices, and events:
 
-The library is unofficial and is not affiliated with or endorsed by Blues Inc. Named operation coverage is partial and follows Blues' evolving [Notehub API documentation](https://dev.blues.io/api-reference/notehub-api/); the generic request method provides access to additional endpoints without waiting for a wrapper.
+```console
+notehub-client web
+```
+
+The dashboard includes a local simulation lab with packaged scenarios and TOML
+uploads. Open **Simulate** from the live workspace to inspect device state, advance
+time, step behaviors, sync Notes, and queue commands. Simulation calls stay on the
+local transport; use **Return to Notehub** to restore the live session.
+[Read about scenarios and simulation →](docs/simulation.md#use-the-web-simulation-lab)
+
+Want a terminal tour without a Notehub token? Install the `tui` extra and run its
+Demo mode:
+
+```console
+pip install "notehub-client[tui] @ git+https://github.com/joebeeson/notehub-client.git"
+notehub-client-tui --demo
+```
+
+The normal browse views use fixed synthetic data. The project picker also offers
+packaged **Simulation · …** projects, so Events, Devices, and Fleets can browse the
+selected local run; press **6** to control that same run in the **Simulation Lab**.
+[Explore the TUI Demo and Simulation Lab →](docs/simulation.md#tui-demo-and-simulation-lab)
+
+<details>
+<summary>Preview the workbench at compact and wide terminal sizes</summary>
+
+![Demo Events workspace at 80 by 24 terminal cells](docs/assets/images/tui-events-compact.svg)
+
+![Demo Events workspace at 140 by 42 terminal cells](docs/assets/images/tui-events-wide.svg)
+</details>
+
+The terminal journeys run through Textual Pilot at simulated terminal sizes, with SVG snapshots
+to catch visual regressions in the compact and wide layouts. [See the TUI guide and test workflow →](docs/tui.md)
+
+### Put your assistant to work
+
+Connect your MCP host to a server that can inspect Notehub projects, devices, sessions, and events:
+
+```console
+uv run --env-file .env notehub-client mcp
+```
+
+Ask it to investigate a device's recent activity or help you explore an event payload. The tools provide read-only access, and your Notehub token stays in the server process.
+
+## Choose your toolkit
+
+Install the extras for the interfaces you want. For the CLI, dashboard, and MCP server together:
+
+```console
+pip install "notehub-client[cli,web,mcp] @ git+https://github.com/joebeeson/notehub-client.git"
+```
+
+| Extra | Ready for |
+| :--- | :--- |
+| `cli` | Terminal exploration, event exports, and scripted reads and writes |
+| `tui` | A terminal workbench, credential-free Demo, and local Simulation Lab |
+| `web` | A local dashboard in your browser |
+| `mcp` | Read-only tools, resources, and prompts for an MCP host |
+| `oauth` | Client-credentials authentication for your Python app |
+| `api` | A local HTTP interface for registered reads |
+| `yaml` | Safe YAML loading for AsyncAPI catalog artifacts |
+| `fsspec` | Catalog sources from local and remote filesystems |
+| `validate` | Explicit payload sample validation, independent of reads and decoding |
+
+The CLI and MCP server use `NOTEHUB_TOKEN`; the dashboard also lets you enter a token when it opens. Configure your MCP host to launch the server command above.
+
+> [!IMPORTANT]
+> Installing the web dashboard from source requires **Node 24 and npm** to build its frontend. Installed wheels run without Node.
+
+## Come on in
+
+The **[Wiki](https://github.com/joebeeson/notehub-client/wiki)** has room to explore: walkthroughs, API details, and guidance for building on the client. Named operations cover common Notehub tasks; [custom API requests](https://github.com/joebeeson/notehub-client/wiki/Custom-API-Requests) take you further.
+
+Have something in mind? **[Share an idea or report a problem](https://github.com/joebeeson/notehub-client/issues)**, or **[join the development](https://github.com/joebeeson/notehub-client/wiki/Contributing)**.
+
+---
+
+`notehub-client` is an independent project, unaffiliated with Blues Inc. See the [Blues API reference](https://dev.blues.io/api-reference/notehub-api/) for Notehub endpoint behavior and permissions.
