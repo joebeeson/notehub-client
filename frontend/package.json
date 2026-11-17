@@ -1,0 +1,18 @@
+{
+  "name": "notehub-client-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ui-sdk/core": "0.1.0-beta.5",
+    "@ui-sdk/web": "0.1.0-beta.5"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3",
+    "vite": "^7.3.0"
+  }
+}

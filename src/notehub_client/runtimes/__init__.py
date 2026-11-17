@@ -2,54 +2,48 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from importlib import import_module
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, cast
 
-from ..errors import NotehubDependencyError
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
-_RUNTIMES: dict[str, tuple[str, frozenset[str]]] = {
-    "cli": ("notehub_client.runtimes.cli", frozenset({"click", "rich"})),
-    "tui": ("notehub_client.runtimes.tui", frozenset({"textual", "click", "rich"})),
+    from .typing import RuntimeModule
+
+# TODO: Are we "hiding" this because it's mutable?
+_RUNTIMES: dict[str, str] = {
+    "cli": "notehub_client.runtimes.cli",
+    "tui": "notehub_client.runtimes.tui",
+    "api": "notehub_client.runtimes.api.server",  # TODO: Why is this different than the others?
+    "web": "notehub_client.runtimes.web",
+    "mcp": "notehub_client.runtimes.mcp",
 }
-
-
-class _RuntimeModule(Protocol):
-    def main(self, args: Sequence[str] | None = None) -> None: ...
 
 
 def runtime_names() -> tuple[str, ...]:
     """Return the names accepted by the package runtime dispatcher."""
-    return tuple(_RUNTIMES)
+    return tuple(
+        _RUNTIMES
+    )  # TODO: Why don't we just freeze and make `_RUNTIMES` be `RUNTIMES` ; if someone then
+    #   wants it they can get it.
 
 
-def _load_runtime(name: str) -> tuple[_RuntimeModule, str]:
+# TODO: We have so much crazy stuff in here that I don't think we need? Or might be better in helpers?
+
+
+def _load_runtime(name: str) -> RuntimeModule:
     try:
-        module_path, optional_modules = _RUNTIMES[name]
+        module_path = _RUNTIMES[name]
     except KeyError:
         raise ValueError(f"Unknown runtime {name!r}; choose from {', '.join(_RUNTIMES)}.") from None
 
-    try:
-        module = cast(_RuntimeModule, import_module(module_path))
-        return module, name
-    except ModuleNotFoundError as error:
-        missing_root = (error.name or "").partition(".")[0]
-        if missing_root not in optional_modules:
-            raise
-        raise NotehubDependencyError(f"{name} runtime", name, missing_root) from error
+    module = cast("RuntimeModule", import_module(module_path))
+    return module
 
 
 def run_runtime(name: str, args: Sequence[str] | None = None) -> None:
-    """Load and start a runtime, translating only its known optional imports."""
-    module, runtime = _load_runtime(name)
-    try:
-        module.main(args)
-    except ModuleNotFoundError as error:
-        missing_root = (error.name or "").partition(".")[0]
-        optional_modules = _RUNTIMES[runtime][1]
-        if missing_root not in optional_modules:
-            raise
-        raise NotehubDependencyError(f"{runtime} runtime", runtime, missing_root) from error
+    """Load and start a runtime."""
+    _load_runtime(name).main(args)
 
 
 __all__ = ["run_runtime", "runtime_names"]

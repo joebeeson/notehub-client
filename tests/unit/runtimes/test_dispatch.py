@@ -1,12 +1,14 @@
+import importlib
+import subprocess
 import sys
 from collections.abc import Callable
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 
 import notehub_client.runtimes as runtimes
-from notehub_client.__main__ import cli_main, main, tui_main
+from notehub_client.__main__ import cli_main, main, mcp_main, tui_main, web_main
 from notehub_client.errors import NotehubDependencyError
 from notehub_client.runtimes import run_runtime, runtime_names
 from notehub_client.runtimes.cli import main as cli_runtime_main
@@ -14,7 +16,7 @@ from notehub_client.runtimes.tui import main as tui_runtime_main
 
 
 def test_runtime_names_list_available_entry_points() -> None:
-    assert runtime_names() == ("cli", "tui")
+    assert runtime_names() == ("cli", "tui", "api", "web", "mcp")
 
 
 def test_run_runtime_loads_a_runtime_and_passes_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -30,22 +32,18 @@ def test_run_runtime_loads_a_runtime_and_passes_arguments(monkeypatch: pytest.Mo
 
 def test_run_runtime_rejects_unknown_names() -> None:
     with pytest.raises(ValueError, match="Unknown runtime"):
-        run_runtime("web")
+        run_runtime("unknown")
 
 
-def test_run_runtime_translates_optional_import_failures(
+def test_run_runtime_preserves_import_failures_from_loader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def missing_click(_module_path: str) -> None:
         raise ModuleNotFoundError("No module named 'click'", name="click")
 
     monkeypatch.setattr(runtimes, "import_module", missing_click)
-    with pytest.raises(NotehubDependencyError) as captured:
+    with pytest.raises(ModuleNotFoundError, match="click"):
         run_runtime("cli")
-
-    assert captured.value.feature == "cli runtime"
-    assert captured.value.extra == "cli"
-    assert captured.value.missing_module == "click"
 
 
 def test_run_runtime_reraises_unrelated_import_failures(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -57,16 +55,53 @@ def test_run_runtime_reraises_unrelated_import_failures(monkeypatch: pytest.Monk
         run_runtime("cli")
 
 
-def test_run_runtime_translates_missing_textual_from_runtime_main(
+def test_tui_runtime_reports_missing_textual(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setitem(sys.modules, "textual", None)
-    with pytest.raises(NotehubDependencyError) as captured:
-        run_runtime("tui")
+    import notehub_client.runtimes.tui as tui
 
-    assert captured.value.feature == "tui runtime"
-    assert captured.value.extra == "tui"
-    assert captured.value.missing_module == "textual"
+    with monkeypatch.context() as scoped:
+        scoped.setitem(sys.modules, "textual", None)
+        with pytest.raises(NotehubDependencyError, match="tui"):
+            importlib.reload(tui)
+    importlib.reload(tui)
+
+
+def test_tui_runtime_reports_missing_rich(monkeypatch: pytest.MonkeyPatch) -> None:
+    import notehub_client.runtimes.tui as tui
+
+    with monkeypatch.context() as scoped:
+        scoped.setitem(sys.modules, "rich", None)
+        with pytest.raises(NotehubDependencyError, match="tui"):
+            importlib.reload(tui)
+    importlib.reload(tui)
+
+
+def test_core_imports_without_textual_or_rich() -> None:
+    script = """
+import importlib.abc
+import sys
+
+class MissingUiLibraries(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'rich', 'textual'}:
+            raise ModuleNotFoundError(f'No module named {fullname!r}', name=fullname.split('.')[0])
+
+sys.meta_path.insert(0, MissingUiLibraries())
+import notehub_client
+from notehub_client import NotehubClient
+assert NotehubClient
+try:
+    import notehub_client.runtimes.tui
+except notehub_client.errors.NotehubDependencyError as error:
+    assert 'notehub-client[tui]' in str(error)
+else:
+    raise AssertionError('TUI imported without its declared optional libraries')
+"""
+    # This is a fixed in-test probe executed by the active interpreter.
+    subprocess.run(  # noqa: S603
+        [sys.executable, "-c", script], check=True, capture_output=True, text=True
+    )
 
 
 def test_run_runtime_reraises_unrelated_failures_from_runtime_main(
@@ -90,17 +125,22 @@ def test_main_dispatches_an_explicit_runtime_and_arguments() -> None:
 
 def test_main_rejects_unknown_runtime_names(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as captured:
-        main(["web"])
+        main(["unknown"])
 
     assert captured.value.code == 2
     error = capsys.readouterr().err
     assert "invalid choice" in error
-    assert "web" in error
+    assert "unknown" in error
 
 
 @pytest.mark.parametrize(
     ("entrypoint", "runtime"),
-    [pytest.param(cli_main, "cli", id="legacy-cli"), pytest.param(tui_main, "tui", id="tui")],
+    [
+        pytest.param(cli_main, "cli", id="legacy-cli"),
+        pytest.param(tui_main, "tui", id="tui"),
+        pytest.param(web_main, "web", id="web"),
+        pytest.param(mcp_main, "mcp", id="mcp"),
+    ],
 )
 def test_console_entrypoints_delegate_to_the_expected_runtime(
     entrypoint: Callable[[], None], runtime: str
@@ -126,8 +166,8 @@ def test_cli_runtime_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert "Work with Blues Notehub" in capsys.readouterr().out
 
 
-def test_tui_runtime_reports_its_scaffold_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "textual", ModuleType("textual"))
-
-    with pytest.raises(SystemExit, match="scaffolded but has no interface yet"):
+def test_tui_runtime_help(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as captured:
         tui_runtime_main(["--help"])
+    assert captured.value.code == 0
+    assert "terminal workbench" in capsys.readouterr().out

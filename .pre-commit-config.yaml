@@ -13,7 +13,7 @@ repos:
       - id: check-added-large-files
   - repo: local
     hooks:
-      # TODO: Are these the right approach for testing?
+      # Static checks run locally; pytest remains a separate check and runs in CI.
       - id: ruff-check
         name: ruff check
         entry: uv run --no-default-groups --group lint ruff check .
@@ -29,6 +29,18 @@ repos:
       - id: pyrefly
         name: pyrefly
         entry: uv run --no-default-groups --group type pyrefly check
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: bandit
+        name: bandit
+        entry: uv run --no-default-groups --group security bandit -c pyproject.toml -r src
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: vulture
+        name: vulture
+        entry: uv run --no-default-groups --group security vulture --config pyproject.toml src tests
         language: system
         types: [python]
         pass_filenames: false

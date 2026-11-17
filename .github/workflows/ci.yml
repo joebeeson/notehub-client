@@ -13,10 +13,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --all-groups --all-extras
       - run: uv run --no-sync pytest
       - run: uv run --no-sync ruff check .
       - run: uv run --no-sync ruff format --check .
       - run: uv run --no-sync pyrefly check
+      - run: npm run check --prefix frontend
+      - run: uv run --no-sync bandit -c pyproject.toml -r src
+      - run: uv run --no-sync vulture --config pyproject.toml src tests
       - run: uv build

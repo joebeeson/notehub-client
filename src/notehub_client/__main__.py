@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from .errors import NotehubDependencyError
 from .runtimes import run_runtime, runtime_names
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def _run(runtime: str, args: Sequence[str] | None, *, prog: str) -> None:
@@ -42,6 +45,21 @@ def cli_main() -> None:
 def tui_main() -> None:
     """Run the TUI through the dedicated ``notehub-client-tui`` script."""
     _run("tui", None, prog="notehub-client-tui")
+
+
+def api_main() -> None:
+    """Run the API through the dedicated ``notehub-client-api`` script."""
+    _run("api", None, prog="notehub-client-api")
+
+
+def web_main() -> None:
+    """Run the browser dashboard through its dedicated console script."""
+    _run("web", None, prog="notehub-client-web")
+
+
+def mcp_main() -> None:
+    """Run the read-only MCP server through its dedicated console script."""
+    _run("mcp", None, prog="notehub-client-mcp")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,13 @@
 __pycache__/
 build/
 dist/
+coverage/
+coverage.xml
+frontend/node_modules/
+htmlcov/
+snapshot_report.html
+src/notehub_client/runtimes/web/static/
+temp/
 
 !.*config*
 !.*ignore*

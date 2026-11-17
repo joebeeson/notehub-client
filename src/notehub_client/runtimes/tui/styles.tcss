@@ -1,0 +1,38 @@
+Screen { background: $background; color: $text; }
+#brand { height: 1; padding: 0 1; background: $primary-background; color: $accent; text-style: bold; }
+#scope-bar, #login, #tools, #sections, #paging { height: 3; }
+#project { width: 1fr; }
+#nav { height: 1; }
+#nav Button { width: 1fr; min-width: 8; height: 1; border: none; content-align: center middle; }
+#scope-bar Button { min-width: 8; }
+.compact #scope-bar, .roomy #scope-bar {
+    layout: grid;
+    grid-size: 5 2;
+    grid-columns: 1fr 1fr 1fr 1fr 1fr;
+    grid-rows: 3 3;
+    height: 6;
+}
+.compact #project, .roomy #project { column-span: 5; width: 1fr; }
+.compact #scope-bar Button, .roomy #scope-bar Button { width: 1fr; min-width: 8; padding: 0; }
+#status, #query-summary { height: 1; padding: 0 1; }
+#status { color: $text-muted; }
+#query-summary { color: $accent; }
+.workspace { height: 1fr; min-height: 5; }
+#view-host > * { display: none; height: 1fr; min-height: 5; }
+#records-view { height: 1fr; min-height: 5; }
+#records { width: 1fr; height: 1fr; }
+#inspector { display: none; width: 40; border-left: solid $primary; }
+.wide.tall #inspector { display: block; }
+#page-info { width: 1fr; content-align: center middle; }
+#paging Button { min-width: 8; }
+#search { width: 1fr; }
+#section { width: 1fr; }
+#resize-notice { display: none; height: 3; padding: 0 1; background: $warning; color: $background; }
+Screen.narrow #resize-notice, Screen.short #resize-notice { display: block; }
+#resize-message { width: 1fr; content-align: left middle; color: $background; }
+#resize-notice Button { height: 1; min-width: 8; margin: 1 0 0 1; padding: 0 1; }
+#signals-strip { display: none; height: 3; padding: 0 1; border-bottom: solid $primary; }
+.dialog { width: 80%; height: 80%; padding: 1 2; background: $surface; border: round $accent; align: center middle; }
+TextDialog { align: center middle; background: $background 70%; }
+.compact #paging Button, .narrow #paging Button { min-width: 6; padding: 0; }
+.compact #nav Button, .narrow #nav Button { min-width: 8; padding: 0; }
