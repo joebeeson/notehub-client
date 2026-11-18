@@ -22,6 +22,32 @@ set their own controlled values with `monkeypatch`.
 - Use plain `assert` for values and `pytest.raises(ExpectedError, match=...)` for failures, checking
   the specific exception type and a stable message fragment.
 
+## Runtime test typing
+
+Run `uv run --group type pyrefly check` alongside the tests. Keep test doubles
+compatible with the public protocol, and narrow optional results with assertions
+before checking their contents. Avoid casts that conceal a missing runtime check.
+
+Keep these boundaries explicit when adding runtime tests:
+
+- Pass concrete widget classes to `query_one` in TUI tests.
+  For rendered output, narrow to Textual `Content` or Rich `Text` before reading `.plain`; cover both
+  string and Rich button labels without broadening production return types.
+- Retain typed references to demo services when asserting
+  their recorded reads. Make wrapper `read` signatures match `ReadService`, including
+  keyword-only arguments, instead of forwarding an untyped `**kwargs` mapping.
+- Assert selected records and modal results are present and
+  of the expected type before inspecting domain fields. Preserve the interaction
+  assertions so the cleanup strengthens the tests rather than merely silencing errors.
+
+Run the affected Pilot tests and the repository type check. Keep
+the production interfaces intact unless a test exposes a real contract mismatch.
+
+The application and simulation project accept the same `ReadService` protocol.
+When a test wraps an existing reader, type the delegate as `ReadService` and
+forward only the protocol's keyword arguments. A typed options dictionary with
+`Unpack` works for doubles that pass arguments through.
+
 ## Textual visual snapshots
 
 Textual tests use Pilot for interaction and the `pytest-textual-snapshot` plugin for intentional SVG

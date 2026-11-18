@@ -5,11 +5,12 @@ from typing import cast
 
 import httpx
 import pytest
+from fastapi import FastAPI
 
 from notehub_client.runtimes.api import create_app
 
 
-async def open_session(client: httpx.AsyncClient, app: object) -> None:
+async def open_session(client: httpx.AsyncClient, app: FastAPI) -> None:
     response = await client.post(
         "/api/session/bootstrap", headers={"X-Launch-Secret": app.state.bootstrap_secret}
     )
@@ -20,11 +21,14 @@ async def open_session(client: httpx.AsyncClient, app: object) -> None:
 async def test_dashboard_simulation_session_and_normal_read_routes() -> None:
     app = create_app(dashboard=False)
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
-        ) as first, httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
-        ) as second:
+        async with (
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as first,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as second,
+        ):
             await open_session(first, app)
             await open_session(second, app)
             catalog = await first.get("/api/simulations")
@@ -40,20 +44,35 @@ async def test_dashboard_simulation_session_and_normal_read_routes() -> None:
             listed = await first.get("/api/projects/" + project + "/devices")
             assert listed.status_code == 200, listed.text
             assert listed.json()["devices"][0]["uid"] == device
-            step = await first.post("/api/simulation/control", json={
-                "action": "step", "generation": generation, "project_uid": project,
-            })
+            step = await first.post(
+                "/api/simulation/control",
+                json={
+                    "action": "step",
+                    "generation": generation,
+                    "project_uid": project,
+                },
+            )
             assert step.status_code == 200, step.text
             assert {item["project_uid"] for item in step.json()["result"]} == {project}
-            control = await first.post("/api/simulation/control", json={
-                "action": "sync", "generation": generation, "project_uid": project,
-            })
+            control = await first.post(
+                "/api/simulation/control",
+                json={
+                    "action": "sync",
+                    "generation": generation,
+                    "project_uid": project,
+                },
+            )
             assert control.status_code == 200, control.text
-            queued = await first.post("/api/simulation/control", json={
-                "action": "command", "generation": generation,
-                "project_uid": project, "device_uid": device,
-                "note": {"file": "commands.qi", "body": {"set_temperature": 22}},
-            })
+            queued = await first.post(
+                "/api/simulation/control",
+                json={
+                    "action": "command",
+                    "generation": generation,
+                    "project_uid": project,
+                    "device_uid": device,
+                    "note": {"file": "commands.qi", "body": {"set_temperature": 22}},
+                },
+            )
             assert queued.status_code == 200, queued.text
             queue_state = queued.json()["snapshot"]["devices"][project][device]
             assert len(queue_state["inbound"]) == 1
@@ -61,10 +80,15 @@ async def test_dashboard_simulation_session_and_normal_read_routes() -> None:
             events = await first.get("/api/projects/" + project + "/events")
             assert events.status_code == 200, events.text
             assert len(events.json()["events"]) == 1
-            cycle = await first.post("/api/simulation/control", json={
-                "action": "cycle", "generation": generation, "seconds": 60,
-                "project_uid": project,
-            })
+            cycle = await first.post(
+                "/api/simulation/control",
+                json={
+                    "action": "cycle",
+                    "generation": generation,
+                    "seconds": 60,
+                    "project_uid": project,
+                },
+            )
             assert cycle.status_code == 200, cycle.text
             assert cycle.json()["snapshot"]["now"] != body["snapshot"]["now"]
             cycled_state = cycle.json()["snapshot"]["devices"][project][device]
@@ -75,18 +99,24 @@ async def test_dashboard_simulation_session_and_normal_read_routes() -> None:
             second_session = (await second.get("/api/session")).json()
             assert second_session["mode"] == "live"
             assert second_session["authenticated"] is False
-            stale = await first.post("/api/simulation/control", json={"action": "reset", "generation": generation})
+            stale = await first.post(
+                "/api/simulation/control", json={"action": "reset", "generation": generation}
+            )
             assert stale.status_code == 200
-            stale_control = await first.post("/api/simulation/control", json={
-                "action": "step", "generation": generation,
-            })
+            stale_control = await first.post(
+                "/api/simulation/control",
+                json={
+                    "action": "step",
+                    "generation": generation,
+                },
+            )
             assert stale_control.status_code == 400
 
 
 @pytest.mark.asyncio
 async def test_toml_upload_label_and_switch_back_to_live() -> None:
     app = create_app(dashboard=False)
-    scenario = '''scenario_version = 1
+    scenario = """scenario_version = 1
 [[projects]]
 uid = "app:custom"
 [[projects]]
@@ -97,21 +127,27 @@ uid = "dev:one"
 [[devices]]
 project_uid = "app:other"
 uid = "dev:one"
-'''
+"""
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://testserver"
         ) as client:
             await open_session(client, app)
-            uploaded = await client.post("/api/simulation/start", json={
-                "toml": scenario, "filename": "custom.toml", "seed": 9,
-            })
+            uploaded = await client.post(
+                "/api/simulation/start",
+                json={
+                    "toml": scenario,
+                    "filename": "custom.toml",
+                    "seed": 9,
+                },
+            )
             assert uploaded.status_code == 200, uploaded.text
             state = (await client.get("/api/simulation")).json()
             assert state["label"] == "custom.toml"
             assert {item["uid"] for item in state["projects"]} == {"app:custom", "app:other"}
             assert {(item["project_uid"], item["uid"]) for item in state["devices"]} == {
-                ("app:custom", "dev:one"), ("app:other", "dev:one"),
+                ("app:custom", "dev:one"),
+                ("app:other", "dev:one"),
             }
             assert "dev:one" in state["snapshot"]["devices"]["app:custom"]
             assert "dev:one" in state["snapshot"]["devices"]["app:other"]
@@ -126,10 +162,15 @@ uid = "dev:one"
             assert other_devices.status_code == 200, other_devices.text
             assert other_devices.json()["devices"][0]["uid"] == "dev:one"
             generation = state["generation"]
-            cycle = await client.post("/api/simulation/control", json={
-                "action": "cycle", "generation": generation, "project_uid": "app:other",
-                "seconds": 30,
-            })
+            cycle = await client.post(
+                "/api/simulation/control",
+                json={
+                    "action": "cycle",
+                    "generation": generation,
+                    "project_uid": "app:other",
+                    "seconds": 30,
+                },
+            )
             assert cycle.status_code == 200, cycle.text
             assert cycle.json()["snapshot"]["now"] != state["snapshot"]["now"]
             ended = await client.delete("/api/session")
@@ -164,7 +205,9 @@ async def test_live_client_survives_simulation_round_trip(monkeypatch: pytest.Mo
             assert started.status_code == 200, started.text
             assert app.state.notehub_sessions[session_id]["client"] is live_client
             assert (await client.get("/api/session")).json() == {
-                "initialized": True, "authenticated": False, "has_live_session": True,
+                "initialized": True,
+                "authenticated": False,
+                "has_live_session": True,
                 "mode": "simulation",
             }
             simulated = await client.post("/api/commands", json={"command": "projects.list"})
@@ -191,11 +234,14 @@ async def test_session_token_and_logout_are_isolated(monkeypatch: pytest.MonkeyP
     monkeypatch.delenv("NOTEHUB_TOKEN", raising=False)
     app = create_app(client_factory=cast("type", SessionClient))
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
-        ) as first, httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
-        ) as second:
+        async with (
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as first,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as second,
+        ):
             await open_session(first, app)
             await open_session(second, app)
             assert (await first.get("/api/session")).json()["authenticated"] is False
@@ -221,22 +267,34 @@ async def test_empty_project_scenario_supports_clock_without_device_actions() ->
             transport=httpx.ASGITransport(app=app), base_url="http://testserver"
         ) as client:
             await open_session(client, app)
-            started = await client.post("/api/simulation/start", json={
-                "toml": scenario, "filename": "empty-project.toml",
-            })
+            started = await client.post(
+                "/api/simulation/start",
+                json={
+                    "toml": scenario,
+                    "filename": "empty-project.toml",
+                },
+            )
             assert started.status_code == 200, started.text
             body = started.json()
             assert body["projects"] == [{"uid": "app:empty", "label": ""}]
             assert body["devices"] == []
 
-            advanced = await client.post("/api/simulation/control", json={
-                "action": "advance", "generation": body["generation"], "seconds": 60,
-            })
+            advanced = await client.post(
+                "/api/simulation/control",
+                json={
+                    "action": "advance",
+                    "generation": body["generation"],
+                    "seconds": 60,
+                },
+            )
             assert advanced.status_code == 200, advanced.text
-            stepped = await client.post("/api/simulation/control", json={
-                "action": "step", "generation": advanced.json()["generation"],
-                "project_uid": "app:empty",
-            })
+            stepped = await client.post(
+                "/api/simulation/control",
+                json={
+                    "action": "step",
+                    "generation": advanced.json()["generation"],
+                    "project_uid": "app:empty",
+                },
+            )
             assert stepped.status_code == 200, stepped.text
             assert stepped.json()["result"] == []
-

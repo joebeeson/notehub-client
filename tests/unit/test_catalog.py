@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from notehub_client.catalog import Catalog, CatalogError, Contract, EventSelector, load, loads
+from notehub_client.catalog.models import pointer_value
 from notehub_client.catalog.sources import load_sources
 from notehub_client.catalog.validation import validate_sample
 
@@ -62,6 +63,40 @@ def test_discriminators_pointer_escaping_and_scalar_equality() -> None:
     assert selector.where(value=2).value == 2
 
 
+@pytest.mark.parametrize(
+    "pointer",
+    [
+        pytest.param("body/value", id="missing-leading-slash"),
+        pytest.param("/missing/~2", id="invalid-escape-after-missing-key"),
+        pytest.param("/missing/trailing~", id="truncated-escape-after-missing-key"),
+    ],
+)
+def test_pointer_syntax_is_validated_before_traversal(pointer: str) -> None:
+    with pytest.raises(ValueError, match="JSON Pointer"):
+        pointer_value({}, pointer)
+    with pytest.raises(ValueError, match="JSON Pointer"):
+        EventSelector(discriminator=pointer)
+
+
+@pytest.mark.parametrize(
+    ("pointer", "expected"),
+    [
+        pytest.param("", {"": "empty", "a/b": ["first"], "~1": "literal"}, id="root"),
+        pytest.param("/", "empty", id="empty-key"),
+        pytest.param("/a~1b/0", "first", id="escaped-slash-and-array"),
+        pytest.param("/~01", "literal", id="escape-decoding-order"),
+    ],
+)
+def test_pointer_resolution_preserves_valid_addressing(pointer: str, expected: object) -> None:
+    assert pointer_value({"": "empty", "a/b": ["first"], "~1": "literal"}, pointer) == expected
+
+
+@pytest.mark.parametrize("pointer", ["/missing", "/items/01", "/items/-", "/items/1"])
+def test_valid_missing_pointer_is_a_lookup_failure(pointer: str) -> None:
+    with pytest.raises(LookupError):
+        pointer_value({"items": ["first"]}, pointer)
+
+
 TOML = """catalog_version = 1
 [[contracts]]
 id = "reading"
@@ -74,6 +109,35 @@ file = "readings.qo"
 discriminator = "/body/v"
 value = 1
 """
+
+
+@pytest.mark.parametrize(
+    ("manifest", "message"),
+    [
+        pytest.param("catalog_version = true", "integer 1", id="boolean-version"),
+        pytest.param("catalog_version = 1.0", "integer 1", id="float-version"),
+        pytest.param(TOML.replace("contracts", "contratcs"), "unknown catalog", id="root-typo"),
+        pytest.param("catalog_version = 1\ncontracts = {}", "array of tables", id="wrong-shape"),
+        pytest.param(
+            TOML + TOML.split("\n", 1)[1].replace("binding =", "bindng ="),
+            "contract #2 has unknown fields",
+            id="late-contract-typo",
+        ),
+        pytest.param(
+            TOML + TOML.split("\n", 1)[1],
+            "contract #2 duplicates",
+            id="duplicate-contract",
+        ),
+    ],
+)
+def test_invalid_manifest_fails_before_reading_companions(manifest: str, message: str) -> None:
+    def read_document(_: str) -> str:
+        pytest.fail("invalid manifest must fail before reading documents")
+
+    with pytest.raises(CatalogError, match=message) as failure:
+        loads(manifest, read_document=read_document)
+    assert failure.value.stage == "load"
+
 
 DOCUMENT = {
     "asyncapi": "3.1.0",

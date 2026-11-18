@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
 import click
 
@@ -14,7 +15,6 @@ from ..helpers import click_options
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from typing import TextIO
 
     from ...typing import QueryValue
 
@@ -92,14 +92,14 @@ def read_text_source(
     label: str,
     is_token_file: bool = False,
 ) -> str:
-    """Read UTF-8 text from a file or stdin, rejecting competing stdin inputs."""
+    """Read a UTF-8 file or text stdin, rejecting competing stdin inputs."""
     if source == "-":
-        if token_file == "-" and not is_token_file:  # noqa: S105
+        # The dash selects stdin; it is not a token value.
+        if token_file == "-" and not is_token_file:  # noqa: S105  # nosec B105
             raise click.UsageError(
                 "standard input can be used by only one of --token-file and input files"
             )
-        get_text_stream = cast("Callable[[str], TextIO]", click.get_text_stream)
-        return get_text_stream("stdin").read()
+        return sys.stdin.read()
     try:
         return Path(source).read_text(encoding="utf-8")
     except (OSError, UnicodeError):
@@ -151,30 +151,6 @@ def event_query(
         raise click.UsageError(f"invalid query input: {error}") from None
 
     try:
-        append_values = (
-            ("deviceUID", device_uids),
-            ("files", files),
-            ("sensorUID", sensor_uids),
-            ("fleetUID", fleet_uids),
-            ("serialNumber", serial_numbers),
-            ("sessionUID", session_uids),
-            ("eventUID", event_uids),
-        )
-        params = query.to_query_params()
-        for key, additions in append_values:
-            current = params.get(key)
-            if not additions or current is None:
-                continue
-            if isinstance(current, str):
-                continue
-            if isinstance(current, tuple) and all(isinstance(item, str) for item in current):
-                if key == "files":
-                    params[key] = ",".join(current)
-                continue
-            raise click.UsageError(
-                f"query parameter {key!r} cannot be combined with a selector switch"
-            )
-        query = Query.from_value(params)
         query = query.devices(*device_uids).files(*files).sensors(*sensor_uids)
         query = query.fleets(*fleet_uids).serial_numbers(*serial_numbers)
         query = query.sessions(*session_uids).events(*event_uids)
@@ -199,8 +175,6 @@ def event_query(
                 )
             query = query.system_files_only()
     except (TypeError, ValueError) as error:
-        if isinstance(error, click.UsageError):
-            raise
         raise click.UsageError(f"invalid event selectors: {error}") from None
     return query
 

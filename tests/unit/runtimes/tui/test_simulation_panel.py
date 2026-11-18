@@ -6,13 +6,16 @@ import asyncio
 from unittest.mock import patch
 
 import pytest
-from textual.widgets import DataTable, Select, Static
+from rich.text import Text
+from textual.content import Content
+from textual.widgets import Button, DataTable, Input, Select, Static
 
+from notehub_client.filters import Query
 from notehub_client.runtimes.tui.app import NotehubApp
 from notehub_client.runtimes.tui.demo import DEMO_PROJECT_UID, DemoReadService
 from notehub_client.runtimes.tui.screens.simulation import SimulationPanel
 from notehub_client.runtimes.tui.service import SimulationProjectService
-from notehub_client.runtimes.tui.state import TUIOptions, ViewId
+from notehub_client.runtimes.tui.state import PageResult, TUIOptions, ViewId
 
 
 @pytest.mark.asyncio
@@ -27,9 +30,9 @@ async def test_simulation_lab_runs_locally_without_api_credentials() -> None:
         await pilot.click("#nav-simulation")
         await pilot.pause()
         assert app.view is ViewId.SIMULATION
-        assert (
-            app.query_one("#simulation-title", Static).render().plain.startswith("SIMULATION LAB")
-        )
+        title = app.query_one("#simulation-title", Static).render()
+        assert isinstance(title, (Text, Content))
+        assert title.plain.startswith("SIMULATION LAB")
         assert app.query_one("#simulation-event-table", DataTable).row_count == 3
 
         initial_time = panel.simulation.now
@@ -53,7 +56,7 @@ async def test_simulation_scenario_change_restarts_a_deterministic_run() -> None
         await pilot.pause(0.1)
         panel = app.query_one(SimulationPanel)
         previous = panel.simulation
-        picker = app.query_one("#simulation-scenario")
+        picker = app.query_one("#simulation-scenario", Select)
         picker.value = "commands"
         await pilot.pause()
 
@@ -187,7 +190,7 @@ async def test_reconnect_after_simulation_does_not_offer_synthetic_uid_as_live_p
         await pilot.pause(0.2)
         await app.disconnect()
 
-        app.query_one("#token").value = "test-token"
+        app.query_one("#token", Input).value = "test-token"
         with (
             patch.object(app.session, "connect", return_value=object()),
             patch(
@@ -195,7 +198,7 @@ async def test_reconnect_after_simulation_does_not_offer_synthetic_uid_as_live_p
                 return_value=DemoReadService(),
             ),
         ):
-            app.query_one("#connect").press()
+            app.query_one("#connect", Button).press()
             await pilot.pause(0.2)
 
         assert app.live_projects
@@ -211,6 +214,7 @@ async def test_reset_drains_inflight_simulation_read_before_closing_shared_run()
         await pilot.pause(0.2)
         previous = app.simulation_project
         assert previous is not None
+        original_reader = previous.reader
 
         class DelayedReader:
             def __init__(self) -> None:
@@ -218,17 +222,33 @@ async def test_reset_drains_inflight_simulation_read_before_closing_shared_run()
                 self.cancelled = asyncio.Event()
                 self.release = asyncio.Event()
 
-            async def read(self, operation: str, **kwargs: object):
+            async def read(
+                self,
+                operation: str,
+                *,
+                project_uid: str | None = None,
+                uid: str | None = None,
+                query: Query | None = None,
+                cursor: str = "0",
+                page_num: int = 1,
+            ) -> PageResult:
                 self.started.set()
                 try:
                     await self.release.wait()
                 except asyncio.CancelledError:
                     self.cancelled.set()
                     raise
-                return await previous.reader.read(operation, **kwargs)
+                return await original_reader.read(
+                    operation,
+                    project_uid=project_uid,
+                    uid=uid,
+                    query=query,
+                    cursor=cursor,
+                    page_num=page_num,
+                )
 
         delayed = DelayedReader()
-        previous.reader = delayed  # type: ignore[assignment]
+        previous.reader = delayed
         app.action_navigate("events")
         await asyncio.wait_for(delayed.started.wait(), timeout=1)
 

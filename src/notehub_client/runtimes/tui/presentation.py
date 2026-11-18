@@ -13,7 +13,17 @@ from rich.text import Text
 # Escape sequences include CSI and OSC, including terminal clipboard controls.
 _ESCAPES = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]")
 _CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
-_SENSITIVE = frozenset({"authorization", "token", "access_token", "refresh_token", "password"})
+_SENSITIVE = frozenset(
+    {"authorization", "token", "accesstoken", "refreshtoken", "password", "clientsecret", "apikey"}
+)
+_ENVIRONMENT_MAPS = frozenset(
+    {
+        "environment",
+        "environment_variables",
+        "environment_variables_effective",
+        "environment_variables_env_default",
+    }
+)
 
 
 def safe_string(value: object) -> str:
@@ -42,12 +52,14 @@ def sanitize_record(record: Mapping[str, Any]) -> dict[str, Any]:
     """
 
     def visit(value: Any, key: str = "") -> Any:
-        if key.casefold() in _SENSITIVE:
-            return "[redacted]"
-        if key.casefold() in {"environment", "environment_variables"}:
+        folded = key.casefold()
+        if folded in _ENVIRONMENT_MAPS:
             if isinstance(value, Mapping):
                 return {str(name): "[masked]" for name in value}
             return "[masked]"
+        normalized = "".join(character for character in folded if character.isalnum())
+        if normalized in _SENSITIVE:
+            return "[redacted]"
         if isinstance(value, Mapping):
             return {str(name): visit(item, str(name)) for name, item in value.items()}
         if isinstance(value, (tuple, list)):

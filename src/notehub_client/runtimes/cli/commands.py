@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Callable, Mapping
+from contextlib import aclosing
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import click
@@ -20,15 +23,16 @@ from .options import (
     read_json_source,
     read_text_source,
 )
-from .output import emit_ndjson, emit_result
+from .output import emit_ndjson, emit_result, save_checkpoint
+from .typing import CLIContext
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
-    from typing import Any, TextIO, Unpack
+    from collections.abc import AsyncIterator, Awaitable
+    from typing import Any, Unpack
 
-    from ...typing import JSONValue
+    from ...typing import Event, JSONValue
     from ..typing import ClientFactory
-    from .typing import CLIContext, EventQueryParams, OutputFormat, PageNumberParams
+    from .typing import EventQueryParams, OutputFormat, PageNumberParams
 
 
 def create_cli(
@@ -81,15 +85,15 @@ def create_cli(
         """Work with Blues Notehub from the command line."""
         if configure_logging:
             configure_rich_logging(log_level)
-        context: CLIContext = {
-            "token_file": token_file,
-            "project_uid": project_uid,
-            "output_format": output_format,
-            "yes": yes,
-            "show_secrets": show_secrets,
-            "client_factory": factory,
-            "resolved_token": None,
-        }
+        context = CLIContext(
+            token_file=token_file,
+            project_uid=project_uid,
+            output_format=output_format,
+            yes=yes,
+            show_secrets=show_secrets,
+            client_factory=factory,
+            resolved_token=None,
+        )
         ctx.obj = context
 
     _add_project_commands(cli)
@@ -174,6 +178,37 @@ def _add_device_commands(cli: click.Group) -> None:
         """Fetch a device by UID in the selected project."""
         project_uid = _project(ctx)
         _run(ctx, lambda client: client.devices.get(project_uid, device_uid), entity="device")
+
+    @devices.command("sessions")
+    @click.argument("device_uid")
+    @page_number_options
+    @click.option("--cursor", help="Read session changes from 0 or a previous checkpoint.")
+    @click.pass_context
+    def list_sessions(
+        ctx: click.Context,
+        device_uid: str,
+        page_size: int,
+        page_num: int | None,
+        cursor: str | None,
+    ) -> None:
+        """Fetch one page of sessions for a device."""
+        if cursor == "":
+            raise click.BadParameter("must be a nonempty string", param_hint="--cursor")
+        if cursor is not None and page_num is not None:
+            raise click.UsageError("--cursor cannot be combined with --page-num")
+        project_uid = _project(ctx)
+        pagination = (
+            CursorPagination(cursor=cursor, page_size=page_size)
+            if cursor is not None
+            else Pagination(page_size=page_size, page_num=page_num)
+        )
+        _run(
+            ctx,
+            lambda client: client.devices.list_sessions(
+                project_uid, device_uid, pagination=pagination
+            ),
+            records_key="sessions",
+        )
 
     @devices.group("env")
     def environment() -> None:
@@ -301,12 +336,18 @@ def _add_event_commands(cli: click.Group) -> None:
     @cursor_options
     @event_query_options(cursor_mode=True)
     @click.option("--limit", type=click.IntRange(1), help="Stop after this many events.")
+    @click.option(
+        "--checkpoint-file",
+        type=click.Path(dir_okay=False, path_type=Path),
+        help="Save the cursor after each fully written page.",
+    )
     @click.pass_context
     def export_events(
         ctx: click.Context,
         page_size: int,
         cursor: str,
         limit: int | None,
+        checkpoint_file: Path | None,
         **selectors: Unpack[EventQueryParams],
     ) -> None:
         """Stream events as NDJSON while following Notehub cursors."""
@@ -314,6 +355,20 @@ def _add_event_commands(cli: click.Group) -> None:
         state = _state(ctx)
         stdin_sources = _query_stdin(selectors)
         _check_stdin(state, stdin_sources)
+        stdout = sys.stdout
+        if checkpoint_file is not None:
+            sources = (state["token_file"], selectors.get("query_file"))
+            target = checkpoint_file.resolve()
+            if any(
+                source and source != "-" and Path(source).resolve() == target for source in sources
+            ):
+                raise click.UsageError("--checkpoint-file must differ from input files")
+            try:
+                same_output = os.path.samestat(checkpoint_file.stat(), os.fstat(stdout.fileno()))
+            except (OSError, ValueError):
+                same_output = False
+            if same_output:
+                raise click.UsageError("--checkpoint-file must differ from the NDJSON output")
         _resolve_token(state)
         query = event_query(token_file=state["token_file"], **selectors)
         conflicts = {"cursor", "pageSize", "pageNum", "sortBy", "sortOrder"}.intersection(query)
@@ -323,23 +378,43 @@ def _add_event_commands(cli: click.Group) -> None:
                 + ", ".join(sorted(conflicts))
             )
 
-        async def export(client: NotehubClient) -> None:
+        async def records(client: NotehubClient) -> AsyncIterator[Event]:
             count = 0
-            async for event in progress.track(
-                client.events.iter(
-                    project_uid,
-                    filters=query,
-                    pagination=CursorPagination(cursor=cursor, page_size=page_size),
-                ),
+            pages = client.events.iter_pages(
+                project_uid,
+                filters=query,
+                pagination=CursorPagination(cursor=cursor, page_size=page_size),
+            )
+            async with aclosing(pages):
+                async for page in pages:
+                    for event in page["events"]:
+                        if count == limit:
+                            return
+                        yield event
+                        count += 1
+                    next_cursor = page.get("next_cursor")
+                    if checkpoint_file is not None and next_cursor:
+                        stdout.flush()
+                        try:
+                            save_checkpoint(checkpoint_file, next_cursor)
+                        except OSError as error:
+                            raise click.ClickException(
+                                f"Could not save export checkpoint: {error.strerror}"
+                            ) from None
+                    if count == limit:
+                        return
+
+        async def export(client: NotehubClient) -> None:
+            tracked = progress.track(
+                records(client),
                 description="Exporting events",
                 total=limit,
-            ):
-                emit_ndjson(event, show_secrets=_state(ctx)["show_secrets"])
-                count += 1
-                if limit is not None and count >= limit:
-                    break
+            )
+            async with aclosing(tracked):
+                async for event in tracked:
+                    emit_ndjson(event, show_secrets=state["show_secrets"])
 
-        with RichProgressObserver() as progress:
+        with RichProgressObserver(stderr=True) as progress:
             _run(ctx, export, stdin_sources=stdin_sources, emit=False)
 
 
@@ -592,8 +667,7 @@ def _confirm_write(ctx: click.Context, prompt: str) -> None:
     state = _state(ctx)
     if state["yes"]:
         return
-    get_text_stream = cast("Callable[[str], TextIO]", click.get_text_stream)
-    if get_text_stream("stdin").isatty():
+    if sys.stdin.isatty():
         click.confirm(prompt, abort=True)
         return
     raise click.UsageError("this write needs confirmation; pass --yes for non-interactive use")

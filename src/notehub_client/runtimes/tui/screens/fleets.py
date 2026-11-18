@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from textual import on
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.message import Message
-from textual.widgets import DataTable, Label, TabbedContent, TabPane
+from textual.widgets import Button, DataTable, Label, TabbedContent, TabPane
 
 from ..state import PageResult
 from ..widgets.records import display_field, populate_record_table, record_table
@@ -70,12 +71,38 @@ class FleetListView(Vertical):
 class FleetDetailView(Vertical):
     """Fleet facts with bounded member-device and event sections."""
 
+    DEFAULT_CSS = """
+    #fleet-devices-pagination, #fleet-events-pagination { height: auto; align-vertical: middle; }
+    #fleet-devices-page { width: auto; margin: 0 1; }
+    """
+
+    class DevicePageRequested(Message):
+        """Move one page from the currently displayed member devices."""
+
+        def __init__(self, fleet_uid: str, *, forward: bool) -> None:
+            super().__init__()
+            self.fleet_uid = fleet_uid
+            self.forward = forward
+
     class SectionSelected(Message):
         """A section became active; the owner can lazily request it."""
 
         def __init__(self, fleet_uid: str, section: str) -> None:
             super().__init__()
             self.fleet_uid, self.section = fleet_uid, section
+
+    class EventPageRequested(Message):
+        """Navigate the app-owned event cursor history."""
+
+        def __init__(self, fleet_uid: str, *, forward: bool) -> None:
+            super().__init__()
+            self.fleet_uid = fleet_uid
+            self.forward = forward
+
+    def set_event_navigation(self, *, previous: bool, following: bool) -> None:
+        """Reflect available retained pages and upstream continuation."""
+        self.query_one("#fleet-events-previous", Button).disabled = not previous
+        self.query_one("#fleet-events-next", Button).disabled = not following
 
     def __init__(
         self,
@@ -89,7 +116,7 @@ class FleetDetailView(Vertical):
         self.fleet = dict(fleet)
         self.devices, self.events = devices, events
 
-    def set_section_result(self, section: str, page: PageResult) -> None:
+    def set_section_result(self, section: str, page: PageResult | None) -> None:
         """Install a lazily fetched section without owning its request."""
         if section not in {"devices", "events"}:
             raise ValueError("Unknown fleet detail section")
@@ -147,6 +174,10 @@ class FleetDetailView(Vertical):
                     classes="resource-empty",
                 )
                 yield Label("", id="fleet-devices-hint", classes="resource-page-hint")
+                with Horizontal(id="fleet-devices-pagination"):
+                    yield Button("Previous", id="fleet-devices-previous", disabled=True)
+                    yield Label("", id="fleet-devices-page")
+                    yield Button("Next", id="fleet-devices-next", disabled=True)
             with TabPane("Events", id="fleet-events"):
                 yield Label("Fleet events", classes="resource-heading")
                 yield self._make_table(
@@ -158,6 +189,9 @@ class FleetDetailView(Vertical):
                     classes="resource-empty",
                 )
                 yield Label("", id="fleet-events-hint", classes="resource-page-hint")
+                with Horizontal(id="fleet-events-pagination"):
+                    yield Button("Previous", id="fleet-events-previous", disabled=True)
+                    yield Button("Next", id="fleet-events-next", disabled=True)
 
     @staticmethod
     def _make_table(table_id: str, columns: tuple[str, ...]) -> DataTable:
@@ -174,6 +208,16 @@ class FleetDetailView(Vertical):
 
     def _render_section(self, section: str) -> None:
         page = getattr(self, section)
+        if section == "devices":
+            number = self.devices.page_num if self.devices is not None else None
+            self.query_one("#fleet-devices-pagination", Horizontal).display = number is not None
+            self.query_one("#fleet-devices-page", Label).update(f"Page {number}" if number else "")
+            self.query_one("#fleet-devices-previous", Button).disabled = (
+                number is None or number <= 1
+            )
+            self.query_one("#fleet-devices-next", Button).disabled = (
+                number is None or self.devices is None or self.devices.has_more is not True
+            )
         fields = (
             ("uid", "serial_number", "last_activity")
             if section == "devices"
@@ -192,7 +236,7 @@ class FleetDetailView(Vertical):
         hint = self.query_one(f"#fleet-{section}-hint", Label)
         hint_text = (
             "More records are available on the next page."
-            if page.has_more is True
+            if page.has_more is True and (section != "devices" or page.page_num is None)
             else "Returned records; total availability was not reported."
             if page.has_more is None
             else ""
@@ -202,8 +246,26 @@ class FleetDetailView(Vertical):
         if not table.row_count:
             table.display = False
 
+    @on(Button.Pressed, "#fleet-devices-previous, #fleet-devices-next")
+    def request_device_page(self, event: Button.Pressed) -> None:
+        """Request another member page through the owning app."""
+        event.stop()
+        self.post_message(
+            self.DevicePageRequested(
+                self.fleet_uid, forward=event.button.id == "fleet-devices-next"
+            )
+        )
+
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         """Ask the owning app to load an uncached fleet section."""
         section = event.pane.id.removeprefix("fleet-") if event.pane.id else "overview"
         if section != "overview" and self.fleet_uid:
             self.post_message(self.SectionSelected(self.fleet_uid, section))
+
+    @on(Button.Pressed, "#fleet-events-previous, #fleet-events-next")
+    def request_event_page(self, event: Button.Pressed) -> None:
+        """Request cursor navigation without exposing opaque tokens."""
+        event.stop()
+        self.post_message(
+            self.EventPageRequested(self.fleet_uid, forward=event.button.id == "fleet-events-next")
+        )

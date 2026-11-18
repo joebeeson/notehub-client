@@ -6,6 +6,8 @@ import asyncio
 import math
 import time
 from collections import deque
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 
 
 class RequestPacer:
@@ -44,11 +46,23 @@ class RequestPacer:
             await asyncio.sleep(delay)
 
     async def defer(self, retry_after: str | None) -> None:
-        """Observe Notehub's Retry-After header after a 429 response."""
+        """Share a 429 cooldown from a delay in seconds or an HTTP-date.
+
+        Missing or malformed headers use the configured period. Cooldowns last
+        at least one second and never shorten an existing deferral. Date values
+        are converted once to a monotonic deadline, so later wall-clock changes
+        do not alter an active cooldown.
+        """
         try:
             seconds = float(retry_after) if retry_after is not None else self.period
         except ValueError:
-            seconds = self.period
+            try:
+                retry_at = parsedate_to_datetime(retry_after or "")
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                seconds = retry_at.timestamp() - time.time()
+            except (ValueError, TypeError, OverflowError):
+                seconds = self.period
         if not math.isfinite(seconds):
             seconds = self.period
         async with self._lock:

@@ -8,6 +8,7 @@ from notehub_client.filters import Query
 from notehub_client.runtimes.tui.demo import DEMO_DEVICE_UID, DEMO_PROJECT_UID, DemoReadService
 from notehub_client.runtimes.tui.paging import CursorHistory
 from notehub_client.runtimes.tui.service import TUIReadService, adapt_page
+from notehub_client.typing import JSONObject
 
 
 @pytest.mark.asyncio
@@ -96,7 +97,7 @@ def test_row_keys_handle_missing_duplicate_and_suffixed_real_ids() -> None:
 
 @pytest.mark.parametrize("next_cursor", [None, "", "0"], ids=["missing", "empty", "same"])
 def test_cursor_validation_stops_invalid_continuation(next_cursor: str | None) -> None:
-    envelope = {"events": [], "has_more": True}
+    envelope: JSONObject = {"events": [], "has_more": True}
     if next_cursor is not None:
         envelope["next_cursor"] = next_cursor
     with pytest.raises(NotehubResponseError, match="cursor"):

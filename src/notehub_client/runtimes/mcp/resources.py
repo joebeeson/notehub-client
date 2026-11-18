@@ -7,15 +7,10 @@ from typing import TYPE_CHECKING, Any
 
 from fastmcp import Context
 
-from .tools import MCPToolContext, get_device, get_project
+from .tools import _current_tool_context, get_device, get_project
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
-
-
-def _notehub_context(ctx: Context) -> MCPToolContext:
-    """Return this server's shared Notehub client and project defaults."""
-    return ctx.lifespan_context["notehub"]
 
 
 def _json_resource(value: Any) -> str:
@@ -39,7 +34,7 @@ def register_notehub_resources(server: FastMCP) -> None:
         """Read a project selected by its UID in the resource URI."""
         result = await get_project(
             project_uid=project_uid,
-            runtime=_notehub_context(ctx),
+            runtime=_current_tool_context(ctx),
         )
         return _json_resource(result)
 
@@ -57,7 +52,7 @@ def register_notehub_resources(server: FastMCP) -> None:
         result = await get_device(
             project_uid=project_uid,
             device_uid=device_uid,
-            runtime=_notehub_context(ctx),
+            runtime=_current_tool_context(ctx),
         )
         return _json_resource(result)
 

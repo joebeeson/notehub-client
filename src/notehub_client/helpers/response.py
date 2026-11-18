@@ -18,10 +18,20 @@ __all__ = [
 ]
 
 
-def require_json_object(payload: JSONValue, context: str) -> JSONObject:
-    """Return a JSON object or raise ``NotehubResponseError``."""
+def _require_uid(obj: JSONObject, context: str) -> None:
+    uid = obj.get("uid")
+    if not isinstance(uid, str) or not uid:
+        raise NotehubResponseError(f"{context} is missing a string uid or the uid is empty")
+
+
+def require_json_object(
+    payload: JSONValue, context: str, *, require_uid: bool = False
+) -> JSONObject:
+    """Return a JSON object, optionally requiring a nonempty string UID."""
     if not isinstance(payload, dict):
         raise NotehubResponseError(f"Expected a JSON object for {context}")
+    if require_uid:
+        _require_uid(payload, context)
     return payload
 
 
@@ -52,18 +62,25 @@ def require_collection(
     *,
     paginated: bool = False,
     optional: bool = False,
+    require_uid: bool = False,
 ) -> JSONObject:
     """Validate a response envelope containing a list of JSON objects.
 
     If ``paginated`` is true, ``has_more`` must be a boolean. A present
     ``next_cursor`` must be a string. If ``optional`` is true, the named list
-    may be absent. Malformed responses raise ``NotehubResponseError``.
+    may be absent. Set ``require_uid`` for collections whose records must have
+    a nonempty string UID. Malformed responses raise ``NotehubResponseError``.
     """
     obj = require_json_object(payload, key)
     if key in obj:
         values = obj[key]
-        if not isinstance(values, list) or any(not isinstance(item, dict) for item in values):
+        if not isinstance(values, list):
             raise NotehubResponseError(f"Expected a list of JSON objects for {key}")
+        for item in values:
+            if not isinstance(item, dict):
+                raise NotehubResponseError(f"Expected a list of JSON objects for {key}")
+            if require_uid:
+                _require_uid(item, f"Record in {key}")
     elif not optional:
         raise NotehubResponseError(f"Missing {key} collection")
     if paginated and type(obj.get("has_more")) is not bool:
@@ -74,11 +91,5 @@ def require_collection(
 
 
 def require_device_collection(payload: JSONValue, *, paginated: bool = True) -> JSONObject:
-    """Validate a device collection, including a string ``uid`` per device."""
-    obj = require_collection(payload, "devices", paginated=paginated)
-    devices = obj["devices"]
-    if not isinstance(devices, list) or any(
-        not isinstance(device, dict) or not isinstance(device.get("uid"), str) for device in devices
-    ):
-        raise NotehubResponseError("Device collection contains an item without a string uid")
-    return obj
+    """Validate a device collection, including a nonempty string UID per device."""
+    return require_collection(payload, "devices", paginated=paginated, require_uid=True)

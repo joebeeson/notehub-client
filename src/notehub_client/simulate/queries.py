@@ -11,7 +11,9 @@ import httpx
 from ..compose import resolve_note_body
 from .simulation import Simulation
 
-__all__ = ["device_rows", "event_page", "page"]
+__all__ = ["device_rows", "event_page", "page", "session_page"]
+
+_CURSOR_HISTORY_LIMIT = 4096
 
 
 def _values(query: httpx.QueryParams, key: str) -> set[str]:
@@ -37,6 +39,16 @@ def page(rows: list[dict[str, Any]], query: httpx.QueryParams, key: str) -> dict
     size = _positive(query, "pageSize", 100)
     offset = (_positive(query, "pageNum", 1) - 1) * size
     return {key: rows[offset : offset + size], "has_more": offset + size < len(rows)}
+
+
+def session_page(
+    run: Simulation, path: str, rows: list[dict[str, Any]], query: httpx.QueryParams
+) -> dict[str, Any]:
+    """Page through simulated sync sessions in their creation order."""
+    if "cursor" not in query:
+        return page(rows, query, "sessions")
+    _supported(query, ("cursor", "pageSize", "pageNum"))
+    return _cursor_page(run, path, rows, query, "sessions")
 
 
 def device_rows(
@@ -116,9 +128,9 @@ def event_page(
     for key, field in selectors.items():
         if key in query:
             rows = [e for e in rows if e.get(field) in _values(query, key)]
-    fleet_ids = _values(query, "fleetUID") if "fleetUID" in query else set()
     if fleet is not None:
-        fleet_ids.add(fleet)
+        rows = [e for e in rows if fleet in run._state(project, e["device"]).definition.fleet_uids]
+    fleet_ids = _values(query, "fleetUID") if "fleetUID" in query else set()
     if fleet_ids:
         rows = [
             e
@@ -155,6 +167,19 @@ def event_page(
         if order not in ("asc", "desc"):
             raise ValueError("sortOrder must be asc or desc")
         rows.sort(key=lambda e: e.get(sort_key, ""), reverse=order == "desc")
+    keys = _values(query, "selectFields") if "selectFields" in query else None
+    if keys is not None and any("." in key for key in keys):
+        raise NotImplementedError("simulation projection supports top-level fields")
+    result = _cursor_page(run, path, rows, query, "events")
+    if keys is not None:
+        result["events"] = [{k: v for k, v in e.items() if k in keys} for e in result["events"]]
+    result["through"] = result["next_cursor"]
+    return result
+
+
+def _cursor_page(
+    run: Simulation, path: str, rows: list[dict[str, Any]], query: httpx.QueryParams, key: str
+) -> dict[str, Any]:
     size = _positive(query, "pageSize", 100)
     signature = (path, tuple(sorted((k, v) for k, v in query.multi_items() if k != "cursor")))
     cursor = query.get("cursor")
@@ -175,14 +200,10 @@ def event_page(
     selected = rows[offset : offset + size]
     next_cursor = uuid4().hex
     run._cursors[next_cursor] = (signature, offset + len(selected))
-    if "selectFields" in query:
-        keys = _values(query, "selectFields")
-        if any("." in k for k in keys):
-            raise NotImplementedError("simulation projection supports top-level fields")
-        selected = [{k: v for k, v in e.items() if k in keys} for e in selected]
+    if len(run._cursors) > _CURSOR_HISTORY_LIMIT:
+        run._cursors.popitem(last=False)
     return {
-        "events": selected,
+        key: selected,
         "has_more": offset + size < len(rows),
         "next_cursor": next_cursor,
-        "through": next_cursor,
     }

@@ -2,14 +2,18 @@
 
 Install ``notehub-client[cli]`` to use :class:`RichProgressObserver`::
 
+    from contextlib import aclosing
+
     from notehub_client.runtimes.helpers import RichProgressObserver
 
     with RichProgressObserver() as progress:
         async with NotehubClient(token, observer=progress) as client:
-            async for event in progress.track(
+            tracked = progress.track(
                 client.events.iter(project_uid), description="Project events"
-            ):
-                ...
+            )
+            async with aclosing(tracked):
+                async for event in tracked:
+                    ...
 
 The core client and its observation protocols do not import Rich.
 """
@@ -43,7 +47,7 @@ from ..observe import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Iterator
+    from collections.abc import AsyncGenerator, AsyncIterable, Awaitable, Iterator
 
     from rich.progress import TaskID
 
@@ -100,6 +104,7 @@ def configure_rich_logging(level: int | str = logging.WARNING) -> None:
     process-level helper is called.
     """
     with runtime_imports("cli", "rich"):
+        from rich.console import Console
         from rich.logging import RichHandler
 
     if isinstance(level, str):
@@ -111,6 +116,7 @@ def configure_rich_logging(level: int | str = logging.WARNING) -> None:
     root = logging.getLogger()
     if not root.handlers:
         handler = RichHandler(
+            console=Console(stderr=True),
             show_time=True,
             show_level=True,
             show_path=True,
@@ -139,8 +145,9 @@ def runtime_imports(runtime: str, *optional_modules: str) -> Iterator[None]:
 class RichProgressObserver:
     """Render requests, iterations, and hosted component lifetimes in Rich progress."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, stderr: bool = False) -> None:
         with runtime_imports("cli", "rich"):
+            from rich.console import Console
             from rich.progress import (
                 BarColumn,
                 Progress,
@@ -156,6 +163,8 @@ class RichProgressObserver:
             BarColumn(),
             TaskProgressColumn(),
             TimeElapsedColumn(),
+            console=Console(stderr=True) if stderr else None,
+            redirect_stdout=not stderr,
         )
         self._request_tasks: dict[int, TaskID] = {}
         self._iteration_tasks: dict[int, TaskID] = {}
@@ -213,21 +222,20 @@ class RichProgressObserver:
             if task_id is not None:
                 self.progress.remove_task(task_id)
 
-    async def track(
+    def track(
         self,
         iterable: AsyncIterable[ItemT],
         *,
         description: str,
         total: int | None = None,
-    ) -> AsyncIterator[ItemT]:
-        """Wrap an async iterable and show its item count while it is consumed."""
-        async for item in observe_async_iterable(
+    ) -> AsyncGenerator[ItemT, None]:
+        """Track item count and expose the observed generator for early closure."""
+        return observe_async_iterable(
             iterable,
             observer=self,
             description=description,
             total=total,
-        ):
-            yield item
+        )
 
     def _update_request_summary(self) -> None:
         description = f"Requests: {self._request_count} complete"

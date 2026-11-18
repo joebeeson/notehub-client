@@ -2,15 +2,46 @@
 
 Live Notehub operations use one same-origin FastAPI app for session bootstrap, named reads, resource URLs, and project event SSE. The SPA owns navigation, transient interaction state, and browser-local favorites. This keeps the Python resource facades as the single path to Notehub. A separate, session-local simulation mode supports deterministic scenario controls without sending requests to Notehub.
 
+```mermaid
+flowchart LR
+    Browser["Browser dashboard"] -->|"Read commands and event streams"| API["Local FastAPI app"]
+    API -->|"Simulation controls"| Run["Session simulation"]
+    API -->|"Resolve the session's client"| Client["NotehubClient resource facades"]
+    Client -->|"Live mode"| Notehub["Notehub API"]
+    Client -->|"Simulation mode"| Transport["Local simulation transport"]
+    Transport --> Run
+```
+
+Simulation controls pass through the same local app and operate on the current
+session's run. Normal resource reads use the same facades in either mode.
+
 ## Current contract
 
 - `POST /api/commands` accepts `{ "command": "devices.list", "args": { "project_uid": "app:...", "page_size": 50 } }`. The explicit registry contains reads only. Unknown commands fail closed; page size and event filter keys are bounded.
 - Named `GET /api/...` routes expose the same read operations for direct links and other local clients. Event query parameters are translated to the command filter shape.
-- `GET /api/projects/{project_uid}/stream/events` relays cursor pages as SSE batches, with `Last-Event-ID` for reconnects. The browser owns deduplication and freshness display.
+- `GET /api/projects/{project_uid}/stream/events` relays cursor pages as SSE batches. Empty pages send heartbeats with their cursor so the browser can resume from the latest `Last-Event-ID`. If Notehub omits a cursor, returns a cursor the stream cannot represent, or cycles through catch-up cursors, the server reports an error and retries from its last checkpoint on the next poll. The browser owns deduplication and freshness display.
 - `GET /api/simulations`, `POST /api/simulation/start`, `GET /api/simulation`, and `POST /api/simulation/control` load named or TOML scenarios and advance only the current browser session's local run. Normal project, device, and event reads continue through `NotehubClient` with the simulation transport.
 - `POST /api/simulation/stop` returns to the live client retained by that browser session. Ending a simulation-only session leaves the workspace chooser available. The live client and simulation client have separate lifetimes.
 - The web process shares an opt-in `RequestPacer` across its Notehub clients, reserving at most six requests per minute. A rate-limited read is retried once after the pacer observes `Retry-After`; a write will need its own retry policy. The event stream polls once per minute, and the opening overview loads only project and device summaries.
 - The PAT lives in the local server session. The launch fragment is exchanged for an HTTP-only cookie and removed from browser history. Simulation state and upload labels are session-local; neither the PAT nor scenario contents are written to browser storage.
+
+The event feed keeps the last delivered record for each event UID. Records
+without an event UID stay separate. The feed shows up to 18 of the 100 events
+retained by the browser, newest first by Notehub receive time, with capture
+time used when receive time is unavailable. Events without a timestamp appear
+after dated events.
+
+Open streams belong to the session workspace that started them. A workspace
+change wakes idle streams, cancels pending polls, and sends a terminal
+`workspace_changed` event. Dashboard streams request `?mode=live`. A reconnect
+while the session is in simulation receives HTTP 204 so the browser stops
+reconnecting. Returning to live mode opens a new stream using the retained
+live client. The status in another affected tab prompts the user to reload.
+
+The opt-in [session browser smoke test](../frontend/README.md) exercises this
+workflow through the production bundle and real session routes, with synthetic
+upstream reads. It checks both tabs' status, cancellation, stale reconnects, and
+client reuse when live mode resumes.
 
 ## Next command requests
 
@@ -37,4 +68,11 @@ Desktop notifications are a possible later opt-in layer on Watch. Request permis
 
 Keep project/resource identity and applied event filters in the URL. Store only small, versioned browser preferences such as favorite UIDs and preferred project locally. Keep the PAT, event bodies, revealed environment values, and uncommitted form data out of browser storage. Account views must remain useful for credentials that can see organizations or billing accounts but no projects.
 
-The artwork catalog at [`temp/spa-artwork/README.md`](../temp/spa-artwork/README.md) is the visual and journey reference for future iterations.
+The Environment inspector masks values in all displayed environment scopes.
+Reveal applies only to the open inspector. Hide masks the values again, and
+closing the drawer or opening another record clears the reveal state.
+
+<!-- TODO(web-workflow-docs): Promote reviewed dashboard journeys from the local
+artwork catalog into docs. Cover opening a simulation, returning to a retained
+live session, and ending a simulation-only session. Use tracked assets and verify
+the steps against the browser. -->

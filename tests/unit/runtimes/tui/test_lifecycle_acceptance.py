@@ -3,22 +3,34 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TypedDict, Unpack
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from rich.text import Text
+from textual.content import Content
 from textual.css.query import NoMatches
-from textual.widgets import DataTable, Select, Static
+from textual.widgets import Button, DataTable, Select, Static
 
 from notehub_client.errors import NotehubAPIError, NotehubAuthenticationError
+from notehub_client.filters import Query
 from notehub_client.runtimes.tui.app import NotehubApp
 from notehub_client.runtimes.tui.demo import DEMO_PROJECT_UID, DemoReadService
 from notehub_client.runtimes.tui.screens.overview import OverviewPanel
+from notehub_client.runtimes.tui.service import ReadService
 from notehub_client.runtimes.tui.state import PageResult, TUIOptions, ViewId
 
 
+class _ReadOptions(TypedDict, total=False):
+    project_uid: str | None
+    uid: str | None
+    query: Query | None
+    cursor: str
+    page_num: int
+
+
 class _DelayedProjectService:
-    def __init__(self, delegate: Any, old_project: str, new_project: str) -> None:
+    def __init__(self, delegate: ReadService, old_project: str, new_project: str) -> None:
         self.delegate = delegate
         self.old_project = old_project
         self.new_project = new_project
@@ -27,7 +39,7 @@ class _DelayedProjectService:
         self.new_scope_loaded = asyncio.Event()
         self.release_old_read = asyncio.Event()
 
-    async def read(self, operation: str, **kwargs: Any) -> PageResult:
+    async def read(self, operation: str, **kwargs: Unpack[_ReadOptions]) -> PageResult:
         project_uid = kwargs.get("project_uid")
         if operation == "events" and project_uid == self.old_project:
             self.old_read_started.set()
@@ -54,7 +66,7 @@ class _PendingReadService:
         self.read_cancelled = asyncio.Event()
         self.release_read = asyncio.Event()
 
-    async def read(self, operation: str, **kwargs: Any) -> PageResult:
+    async def read(self, operation: str, **kwargs: Unpack[_ReadOptions]) -> PageResult:
         if operation == "projects":
             return PageResult(
                 rows=({"uid": "app:acceptance", "label": "Acceptance"},),
@@ -76,12 +88,12 @@ class _PendingReadService:
 
 
 class _RetainingFailureService:
-    def __init__(self, delegate: Any) -> None:
+    def __init__(self, delegate: ReadService) -> None:
         self.delegate = delegate
         self.refresh_started = asyncio.Event()
         self.release_refresh = asyncio.Event()
 
-    async def read(self, operation: str, **kwargs: Any) -> PageResult:
+    async def read(self, operation: str, **kwargs: Unpack[_ReadOptions]) -> PageResult:
         if operation == "events":
             self.refresh_started.set()
             await self.release_refresh.wait()
@@ -90,7 +102,7 @@ class _RetainingFailureService:
 
 
 class _OwnershipService:
-    async def read(self, operation: str, **kwargs: Any) -> PageResult:
+    async def read(self, operation: str, **kwargs: Unpack[_ReadOptions]) -> PageResult:
         if operation == "projects":
             return PageResult(
                 rows=({"uid": "app:acceptance", "label": "Acceptance"},),
@@ -111,8 +123,10 @@ async def test_delayed_old_project_result_cannot_repaint_new_project() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause(0.1)
         assert isinstance(app.service, DemoReadService)
-        delayed = _DelayedProjectService(app.service, old_project, new_project)
-        app.service = delayed  # type: ignore[assignment]
+        original = app.service
+        assert original is not None
+        delayed = _DelayedProjectService(original, old_project, new_project)
+        app.service = delayed
         app.query_one(OverviewPanel).service = delayed
 
         app.action_navigate("events")
@@ -144,7 +158,7 @@ async def test_pending_read_is_cancelled_on_disconnect_or_exit(termination: str)
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause(0.1)
         service = _PendingReadService()
-        app.service = service  # type: ignore[assignment]
+        app.service = service
         service.armed = True
 
         app.action_navigate("events")
@@ -162,19 +176,21 @@ async def test_pending_read_is_cancelled_on_disconnect_or_exit(termination: str)
 @pytest.mark.asyncio
 async def test_authentication_failure_disconnects_from_inside_fetch_worker() -> None:
     class RejectedService:
-        async def read(self, operation: str, **kwargs: Any) -> PageResult:
+        async def read(self, operation: str, **kwargs: Unpack[_ReadOptions]) -> PageResult:
             raise NotehubAuthenticationError(401, "rejected")
 
     app = NotehubApp(options=TUIOptions(demo=True, project_uid=DEMO_PROJECT_UID))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause(0.1)
-        app.service = RejectedService()  # type: ignore[assignment]
+        app.service = RejectedService()
         app.action_navigate("events")
         await pilot.pause(0.1)
 
         assert app.service is None
         assert app.query_one("#login").display is True
-        assert "Authentication rejected" in app.query_one("#status", Static).render().plain
+        status = app.query_one("#status", Static).render()
+        assert isinstance(status, (Text, Content))
+        assert "Authentication rejected" in status.plain
 
 
 @pytest.mark.asyncio
@@ -220,8 +236,10 @@ async def test_refresh_keeps_last_good_rows_visible_while_pending_and_after_fail
         previous_rows = app.result.rows
         assert previous_rows
 
-        service = _RetainingFailureService(app.service)
-        app.service = service  # type: ignore[assignment]
+        original = app.service
+        assert original is not None
+        service = _RetainingFailureService(original)
+        app.service = service
         app.action_refresh()
         await asyncio.wait_for(service.refresh_started.wait(), timeout=1)
 
@@ -233,7 +251,9 @@ async def test_refresh_keeps_last_good_rows_visible_while_pending_and_after_fail
 
         assert app.result.rows == previous_rows
         assert app.query_one("#records", DataTable).row_count == len(previous_rows)
-        status = app.query_one("#status", Static).render().plain
+        rendered = app.query_one("#status", Static).render()
+        assert isinstance(rendered, (Text, Content))
+        status = rendered.plain
         assert "Notehub service unavailable" in status
         assert "private response body" not in status
 
@@ -244,7 +264,7 @@ async def test_reconnect_rebuilds_panels_with_the_new_service() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause(0.1)
         first = _OwnershipService()
-        app.service = first  # type: ignore[assignment]
+        app.service = first
         await app._install_panels()
         assert app.query_one(OverviewPanel).service is first
         app.activity.durations.append(12.3)
@@ -263,7 +283,7 @@ async def test_reconnect_rebuilds_panels_with_the_new_service() -> None:
             patch.object(app.session, "connect", return_value=object()),
             patch("notehub_client.runtimes.tui.app.TUIReadService", return_value=second),
         ):
-            app.query_one("#connect").press()
+            app.query_one("#connect", Button).press()
             await pilot.pause(0.2)
 
         assert app.query_one(OverviewPanel).service is second

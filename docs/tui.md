@@ -10,6 +10,10 @@ Simulation scenarios as local projects. Use the **Simulation Lab** to advance sc
 device behavior, sync queued Notes, and reset a run; Events, Devices, and Fleets then inspect the
 same active simulation. No simulation request is sent to Notehub.
 
+Open a device and select **Sessions** to browse its session history. **Previous**
+and **Next** move between numbered pages. Refresh rechecks the displayed page,
+and returning to a device restores its last successful Sessions page.
+
 ## Demo captures
 
 These illustrations come from Textual's headless test driver using the fixed Demo dataset. They
@@ -26,6 +30,14 @@ uv run --group test python docs/assets/scripts/export_tui_previews.py
 ```
 
 ## Interaction and visual regression checks
+
+The fleet detail Devices tab provides Previous and Next controls. Refresh reloads
+the displayed page, and returning to a fleet restores its last successful page.
+The fleet Events tab provides cursor navigation with up to ten retained pages.
+Previous and revisiting a retained Next page use those snapshots without a new
+request. An empty page can still offer Next when Notehub returns a continuation.
+Refresh restarts event traversal; a failed or malformed response preserves the
+last successful history. Filters start a separate history for the selected fleet.
 
 Textual `App.run_test()` and Pilot exercise keyboard, mouse, navigation, refresh, selection, error
 recovery, and resizing without a real terminal or Notehub API. The integrated acceptance tests cover

@@ -6,6 +6,7 @@ from textual.widgets import DataTable, Label, TabbedContent
 
 from notehub_client.runtimes.tui.screens.devices import DeviceDetailView, DeviceListView
 from notehub_client.runtimes.tui.screens.fleets import FleetDetailView, FleetListView
+from notehub_client.runtimes.tui.service import adapt_page
 from notehub_client.runtimes.tui.state import PageResult
 
 
@@ -95,7 +96,38 @@ async def test_environment_values_are_never_rendered_and_tab_requests_lazy_read(
         rendered = app.export_screenshot()
         assert "secret-value" not in rendered.casefold()
         assert "API_TOKEN" in rendered
-        assert "does not establish current connectivity" in str(view.children[2].content)
+        connectivity = view.children[2]
+        assert isinstance(connectivity, Label)
+        assert "does not establish current connectivity" in str(connectivity.content)
+
+
+@pytest.mark.asyncio
+async def test_device_session_table_reads_session_wire_fields() -> None:
+    page = adapt_page(
+        "sessions",
+        {
+            "sessions": [
+                {"session": "session-a", "session_began": 1667250832, "period": {"duration": 0}},
+                {"session": "session-b"},
+            ],
+            "has_more": False,
+        },
+    )
+    app = DeviceDetailApp({"uid": "dev:west"})
+    async with app.run_test():
+        view = app.query_one(DeviceDetailView)
+        view.set_section_result("sessions", page)
+        table = view.query_one("#device-sessions-table", DataTable)
+        assert [str(cell) for cell in table.get_row("session-a")] == [
+            "session-a",
+            "1667250832",
+            "0",
+        ]
+        assert [str(cell) for cell in table.get_row("session-b")] == [
+            "session-b",
+            "not reported",
+            "not reported",
+        ]
 
 
 @pytest.mark.asyncio

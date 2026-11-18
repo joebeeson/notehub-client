@@ -5,6 +5,8 @@ MkDocs configuration is intentionally deferred until a site structure is selecte
 
 ## Guides
 
+- [Runnable Python examples](../examples/README.md) for offline workflows.
+- [Runtime entry points](runtimes.md): optional interfaces, launch commands, and runtime metadata.
 - [Terminal workbench](tui.md): Demo and Simulation Lab, keyboard workflows, and headless visual tests.
 - [Simulation](simulation.md): local scenarios and simulation flows.
 - [Payload catalog](payload-catalog.md): schema-backed payload decoding and upgrades.

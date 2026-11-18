@@ -168,7 +168,7 @@ class SimulationPanel(Vertical):
                 safe_text(temperature),
                 safe_text(state["steps"]),
                 safe_text(
-                    state["sessions"][-1].get("when", "not synced")
+                    state["sessions"][-1].get("session_began", "not synced")
                     if state["sessions"]
                     else "not synced"
                 ),

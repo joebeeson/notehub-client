@@ -8,8 +8,9 @@ import "@ui-sdk/web/command";
 import "@ui-sdk/web/toggle";
 import "./style.css";
 import "./details.css";
+import { eventFeedTime, mergeEventFeed } from "./event-feed";
+import { maskSensitive, type Json } from "./presentation";
 
-type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 type RecordValue = Record<string, Json>;
 type SimulationSnapshot = { now: string; events: RecordValue[]; devices: Record<string, Record<string, RecordValue>> };
 type CommandName =
@@ -329,15 +330,6 @@ function restoreRoute(): void {
   }
 }
 
-function maskSensitive(value: Json, reveal = false): Json {
-  if (reveal || !value || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map((item) => maskSensitive(item));
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
-    /password|passwd|passphrase|secret|token|credential|private.?key|api.?key|access.?key/i.test(key)
-      ? "••••••••" : maskSensitive(item),
-  ]));
-}
-
 type Favorite = { projectUid: string; deviceUid: string };
 const favoriteKey = "notehub-control:favorites:v1";
 function favorites(): Favorite[] {
@@ -376,6 +368,12 @@ function shell(): void {
     </div>
     <ui-drawer id="detail-drawer" side="right"><ui-drawer-backdrop hidden></ui-drawer-backdrop><ui-drawer-content hidden><ui-drawer-title>Record inspector</ui-drawer-title><ui-drawer-description>Read-only Notehub details</ui-drawer-description><div id="detail-content"></div><ui-drawer-close><button class="dialog-close" aria-label="Close details">Close</button></ui-drawer-close></ui-drawer-content></ui-drawer>
     <ui-dialog id="command-dialog"><ui-dialog-backdrop hidden></ui-dialog-backdrop><ui-dialog-content hidden><ui-dialog-title>Search or go to</ui-dialog-title><ui-dialog-description>Navigate views and projects</ui-dialog-description><ui-command><ui-command-input><input aria-label="Search destinations" placeholder="Search views or projects" /></ui-command-input><ui-command-empty>No destinations found.</ui-command-empty><ui-command-list><ui-command-group><ui-command-group-label>Views</ui-command-group-label>${views.filter((view) => state.projects.length || ["organizations", "billing"].includes(view.id)).map((view) => `<ui-command-item value="view:${view.id}">${escape(view.label)}</ui-command-item>`).join("")}</ui-command-group><ui-command-group><ui-command-group-label>Projects</ui-command-group-label>${state.projects.map((project) => `<ui-command-item value="project:${escape(project.uid)}">${escape(title(project))} · ${escape(project.uid)}</ui-command-item>`).join("")}</ui-command-group></ui-command-list></ui-command></ui-dialog-content></ui-dialog>`;
+  const detailDrawer = document.querySelector("#detail-drawer")!;
+  detailDrawer.addEventListener("openchange", (event) => {
+    if ((event as CustomEvent<{ value: boolean }>).detail.value) return;
+    state.detailId += 1;
+    detailDrawer.querySelector("#detail-content")?.replaceChildren();
+  });
   const select = document.querySelector<HTMLSelectElement>("#project");
   if (select) {
     select.innerHTML = state.projects.map((p) => `<option value="${escape(p.uid)}" ${p.uid === state.project ? "selected" : ""}>${escape(title(p))}</option>`).join("");
@@ -412,8 +410,8 @@ function status(): void {
   el.textContent = state.streamError ? `● Stream error: ${state.streamError}` : age === undefined ? "● Connecting" : `● Live · checked ${age}s ago`;
   el.classList.toggle("error", !!state.streamError || (age !== undefined && age > 90));
   const newest = document.querySelector("#newest-event");
-  const received = Math.max(...state.events.map((event) => Number(event.received || 0)), 0);
-  if (newest) newest.textContent = received ? `Newest event: ${new Date(received * 1000).toLocaleTimeString()}` : "Newest event: —";
+  const latest = state.events.length ? eventFeedTime(state.events[0]) : undefined;
+  if (newest) newest.textContent = latest === undefined ? "Newest event: —" : `Newest event: ${new Date(latest * 1000).toLocaleTimeString()}`;
 }
 
 function startStream(): void {
@@ -421,13 +419,11 @@ function startStream(): void {
   state.checkedAt = undefined;
   state.streamError = undefined;
   if (!state.project) { status(); return; }
-  const stream = new EventSource(`/api/projects/${encodeURIComponent(state.project)}/stream/events`);
+  const stream = new EventSource(`/api/projects/${encodeURIComponent(state.project)}/stream/events?mode=live`);
   state.stream = stream;
   stream.addEventListener("batch", (message) => {
     const data = JSON.parse((message as MessageEvent).data) as { events: RecordValue[]; checked_at: number };
-    const identity = (event: RecordValue) => String(event.event || JSON.stringify(event));
-    const existing = new Set(state.events.map(identity));
-    state.events = [...data.events.filter((event) => !existing.has(identity(event))), ...state.events].slice(0, 100);
+    state.events = mergeEventFeed(state.events, data.events);
     state.checkedAt = data.checked_at;
     state.streamError = undefined;
     status();
@@ -437,15 +433,24 @@ function startStream(): void {
     }
   });
   stream.addEventListener("heartbeat", (message) => { state.checkedAt = JSON.parse((message as MessageEvent).data).checked_at; state.streamError = undefined; status(); });
-  stream.addEventListener("error", () => { state.streamError = "reconnecting"; status(); });
+  stream.addEventListener("workspace_changed", () => {
+    stream.close();
+    state.streamError = "workspace changed; reload to resume";
+    status();
+  });
+  stream.addEventListener("error", (message) => {
+    if (message instanceof MessageEvent) state.streamError = "event check failed; retrying on the next poll";
+    else state.streamError = stream.readyState === EventSource.CLOSED ? "stream closed; reload to resume" : "reconnecting";
+    status();
+  });
   status();
 }
 
 function eventFeed(events: RecordValue[]): string {
   if (!events.length) return '<div class="empty">No recent events yet. Monitoring will continue.</div>';
   return `<ui-timeline feed aria-label="Recent Notehub events">${events.slice(0, 18).map((event, index) => {
-    const time = Number(event.received || event.when || 0);
-    const date = time ? new Date(time * 1000) : null;
+    const time = eventFeedTime(event);
+    const date = time === undefined ? null : new Date(time * 1000);
     return `<ui-timeline-item value="${escape(event.event || index)}"><ui-timeline-marker></ui-timeline-marker><ui-timeline-connector></ui-timeline-connector><ui-timeline-title>${escape(event.file || event.req || "Event")}</ui-timeline-title><ui-timeline-time><time datetime="${date?.toISOString() || ""}">${date?.toLocaleTimeString() || "Time unknown"}</time></ui-timeline-time><ui-timeline-description>${escape(event.device || event.best_id || "Notehub")} · <button data-event="${index}">Inspect event</button></ui-timeline-description></ui-timeline-item>`;
   }).join("")}</ui-timeline>`;
 }
@@ -521,7 +526,7 @@ async function showDetail(row: RecordValue): Promise<void> {
   );
   if (!reads.length) { content.querySelector("#related")?.remove(); return; }
   const results = await Promise.allSettled(reads.map(([, name, args]) => command<Json>(name, args)));
-  if (detailId !== state.detailId) return;
+  if (detailId !== state.detailId || !content.isConnected) return;
   const related = content.querySelector<HTMLDivElement>("#related");
   if (!related) return;
   related.className = "related";
@@ -530,8 +535,12 @@ async function showDetail(row: RecordValue): Promise<void> {
     const index = Number(button.dataset.reveal);
     const result = results[index];
     if (result.status === "fulfilled") {
-      button.previousElementSibling!.textContent = JSON.stringify(result.value, null, 2);
-      button.remove();
+      const revealing = button.dataset.revealed !== "true";
+      button.previousElementSibling!.textContent = JSON.stringify(
+        revealing ? result.value : maskSensitive(result.value), null, 2,
+      );
+      button.dataset.revealed = String(revealing);
+      button.textContent = revealing ? "Hide sensitive values" : "Reveal sensitive values";
     }
   }));
 }
@@ -621,6 +630,7 @@ async function boot(): Promise<void> {
     return;
   }
   if (session.mode === "simulation") {
+    state.stream?.close();
     const current = await api<{ scenario: string | null; label: string | null; live_session: boolean; seed: number; generation: number; projects: { uid: string; label?: string }[]; devices: { project_uid: string; uid: string }[]; snapshot: SimulationSnapshot }>("/api/simulation");
     state.mode = "simulation"; state.scenarioName = current.label || current.scenario || "Scenario";
     state.hasLiveSession = current.live_session;

@@ -58,8 +58,10 @@ async def example():
 ```
 
 `queue()` and `queue_many()` use the existing body composition converters, including
-`to_note_body()` and registered third-party converters. Generators run in caller
-order, and Notes successfully queued before a generator failure remain queued.
+`to_note_body()` and registered third-party converters. `queue_many()` checks
+that the run is open and the destination ends in `.qo` before pulling any
+bodies, even if the input is empty. Generators run in caller order, and Notes
+successfully queued before a generator failure remain queued.
 
 `sync()` transfers all pending outbound `.qo` Notes into cloud events, transfers
 cloud `.qi` Notes onto the device, records a session, and updates the device's
@@ -438,10 +440,39 @@ serial/session/sensor selection, captured/uploaded date ranges, system files,
 received time (`modified`), device UID, serial, and best ID. Geolocation sorting,
 nested projection, and unmodeled device filters return HTTP 501.
 
-Event cursors belong to one run, endpoint, and query. Start with cursor `"0"`,
+Fleet endpoints always retain their path scope. A `fleetUID` query selects
+matching memberships within that scope; it cannot include devices or events
+outside the endpoint's fleet. Repeated fleet query values match any listed
+fleet, while still requiring membership in the endpoint's fleet.
+
+Event and session cursors belong to one run, endpoint, and query. Start with cursor `"0"`,
 then pass the returned cursor with the same query and page size. Numbered pages
 and sorting work without cursors. Default event order is insertion order.
 Device, project, and session lists support numbered pages.
+
+The simulator retains the latest 4,096 issued cursors per run, shared across
+clients and queries. A cursor that has been evicted or belongs to a previous run
+returns HTTP 400. Start a new traversal explicitly if the saved cursor is no
+longer available.
+
+Use `client.events.iter_pages()` when checkpointing a read. Save a nonempty
+`next_cursor` only after handling every event on the page. This includes empty
+pages and the terminal page if it provides a cursor. Keep the last checkpoint
+if the terminal page has no cursor. Keep the same project,
+filters, and page size when resuming. If processing stops before the checkpoint
+is saved, the page can replay. Persist event IDs or make processing idempotent
+when duplicate delivery matters. Include `event` in `selectFields` if you deduplicate
+by event ID. See the
+[checkpoint example](../examples/event_checkpoints.py) for a simulation that
+replays a page within the same run.
+
+Use `client.devices.iter_session_pages(project_uid, device_uid)` to checkpoint
+device sessions the same way. Resume with `pagination=filters.cursor(checkpoint)`
+and keep the same filters and page size. Notehub can return an existing session
+when it changes, so update your stored record for that session UID. Simulated
+syncs append a session record in creation order and leave earlier records
+as they were. Use `client.devices.list_sessions(..., pagination=filters.page())`
+to fetch a numbered page instead.
 
 Clients share one run's state. Each call to `scenario.start()` creates isolated
 state. `run.client()` owns both the ordinary client and injected HTTP client.

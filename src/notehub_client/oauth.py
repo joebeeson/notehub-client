@@ -27,6 +27,10 @@ class NotehubOAuthTokenProvider:
     Concurrent requests share a token refresh. ``leeway`` causes renewal to
     begin before the token's reported expiration time. Supply it as seconds or
     a :class:`datetime.timedelta`.
+
+    Invalid token responses raise ``NotehubOAuthError`` and are discarded, so
+    a later call can attempt a new exchange. Failed calls are not retried
+    automatically, and there is no background refresh task.
     """
 
     def __init__(
@@ -93,6 +97,10 @@ class NotehubOAuthTokenProvider:
                         TOKEN_URL, grant_type="client_credentials"
                     )
                 except Exception as error:
+                    # TODO(oauth-backoff): Design an opt-in failed-exchange
+                    # cooldown for queued callers. Cover transient versus invalid
+                    # credentials, cancellation, and recovery with a fake clock;
+                    # never reuse a rejected token or expose server response data.
                     LOGGER.warning(
                         "Notehub OAuth token exchange failed: error_type=%r",
                         type(error).__name__,
@@ -102,6 +110,9 @@ class NotehubOAuthTokenProvider:
                 refreshed = True
             access_token = token.get("access_token") if token is not None else None
             if not isinstance(access_token, str) or not access_token:
+                # Authlib caches fetched tokens before our bearer validation.
+                # Rejecting one must permit the next caller to exchange again.
+                self._client.token = None
                 LOGGER.warning(
                     "Notehub OAuth token response invalid: reason=%r", "missing_access_token"
                 )
@@ -109,6 +120,7 @@ class NotehubOAuthTokenProvider:
             try:
                 validated_token = validate_bearer_token(access_token)
             except ValueError:
+                self._client.token = None
                 LOGGER.warning(
                     "Notehub OAuth token response invalid: reason=%r", "invalid_access_token"
                 )

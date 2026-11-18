@@ -229,11 +229,15 @@ class Job(TypedDict):
 class Monitor(TypedDict):
     """Monitor configuration and optional alert-routing details."""
 
-    aggregate_function: NotRequired[Literal["none", "avg", "max", "min", "sum", "count"]]  # TODO: Might want to pull this literal up
+    aggregate_function: NotRequired[
+        Literal["none", "avg", "max", "min", "sum", "count"]
+    ]  # TODO: Might want to pull this literal up
     aggregate_window: NotRequired[str]
     alert: NotRequired[bool]
     alert_routes: NotRequired[
-        list[SlackWebHookNotification | SlackBearerNotification | EmailNotification]  # TODO: Another possible pull up
+        list[
+            SlackWebHookNotification | SlackBearerNotification | EmailNotification
+        ]  # TODO: Another possible pull up
     ]
     condition_type: NotRequired[
         Literal[  # TODO: Possible pull up
@@ -379,6 +383,7 @@ class SessionResponse(TypedDict):
 
     has_more: bool
     sessions: list[DeviceSession]
+    next_cursor: NotRequired[str]
 
 
 class LatestResponse(TypedDict):

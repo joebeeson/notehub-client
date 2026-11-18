@@ -79,6 +79,7 @@ Issues = "https://github.com/joebeeson/notehub-client/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/notehub_client"]
+artifacts = ["src/notehub_client/runtimes/web/static/**"]
 
 [tool.pytest.ini_options]
 addopts = [

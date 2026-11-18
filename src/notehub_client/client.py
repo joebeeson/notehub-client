@@ -149,7 +149,11 @@ class NotehubClient:
         await self.aclose()
 
     async def aclose(self) -> None:
-        """Close the client and its HTTP transport when the client owns it."""
+        """Close the client and its HTTP transport when the client owns it.
+
+        Requests waiting for a token or pacing slot fail before dispatch once
+        the wait ends. The caller controls the lifetime of a borrowed transport.
+        """
         self._closed = True
         if self._owns_http:
             await self._http.aclose()
@@ -166,7 +170,9 @@ class NotehubClient:
     ) -> JSONValue:
         """Request a relative /v1/ endpoint; return JSON or None for an empty response.
 
-        No retries or redirects are performed. An optional pacer can delay requests.
+        No retries or redirects are performed. The optional pacer reserves a
+        slot before resolving dynamic credentials. A slot counts even if token
+        resolution fails or the request is cancelled after reservation.
         API response bodies are not used in
         exception messages because they can echo credentials or application data.
         """
@@ -184,21 +190,26 @@ class NotehubClient:
             raise ValueError("path must be relative to /v1/; use params for query values")
         if json is not None and data is not None:
             raise ValueError("json and data are mutually exclusive")
-        auth = await self._provider() if self._provider else self._token
-        auth = validate_bearer_token(auth)
         request_headers = dict(headers or {})
         if any(k.lower() == "authorization" for k in request_headers):
             raise ValueError("Authentication is controlled by token or token_provider")
-        request_headers["Authorization"] = f"Bearer {auth}"
         observer = self._observer
         request_id = next(self._request_ids) if observer is not None else None
         operation = active_operation() if observer is not None else None
         if request_id is not None:
             notify(observer, RequestStarted(request_id, method, path, operation))
         started_at = perf_counter()
+        sending = False
         try:
             if self._pacer is not None:
                 await self._pacer.acquire()
+                if self._closed:
+                    raise RuntimeError("NotehubClient is closed")
+            auth = await self._provider() if self._provider is not None else self._token
+            if self._closed:
+                raise RuntimeError("NotehubClient is closed")
+            request_headers["Authorization"] = f"Bearer {validate_bearer_token(auth)}"
+            sending = True
             response = await self._http.request(
                 method,
                 f"{self._base_url}/v1/{path}",
@@ -216,7 +227,7 @@ class NotehubClient:
                     RequestCancelled(request_id, method, path, duration_ms, operation),
                 )
             raise
-        except httpx.HTTPError as error:
+        except Exception as error:
             duration_ms = round((perf_counter() - started_at) * 1000, 1)
             if request_id is not None:
                 notify(
@@ -230,6 +241,8 @@ class NotehubClient:
                         operation,
                     ),
                 )
+            if not sending or not isinstance(error, httpx.HTTPError):
+                raise
             LOGGER.warning(
                 "Notehub transport failed: method=%r path=%r error_type=%r duration_ms=%r",
                 method,

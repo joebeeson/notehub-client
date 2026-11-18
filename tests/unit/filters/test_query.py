@@ -105,7 +105,27 @@ def test_query_builders_reject_invalid_values(factory: Callable[[], object], mes
 def test_empty_selector_is_a_no_op_and_files_append() -> None:
     query = files("sensors.qo")
     assert query.devices() is query
+    assert query.files() is query
+    assert dict(files()) == {}
     assert dict(query.files("status.qo")) == {"files": "sensors.qo,status.qo"}
+
+
+def test_files_append_preserves_repeated_wire_values() -> None:
+    query = Query.from_value({"files": ("a.qo", "b.qo")})
+    assert query.files() is query
+    assert dict(query.files("c.qo")) == {"files": "a.qo,b.qo,c.qo"}
+    assert query["files"] == ("a.qo", "b.qo")
+
+
+def test_append_rejects_a_conflicting_scalar_and_keeps_compatible_strings() -> None:
+    invalid = Query.from_value({"deviceUID": 123})
+    with pytest.raises(ValueError, match="deviceUID.*must contain strings"):
+        invalid.devices("dev:two")
+    assert invalid["deviceUID"] == 123
+    assert Query.from_value({"deviceUID": "dev:one"}).devices("dev:two")["deviceUID"] == (
+        "dev:one",
+        "dev:two",
+    )
 
 
 def test_query_from_value_normalizes_list_values() -> None:

@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterable, AsyncIterator, Coroutine
 from itertools import count
-from typing import Any, TypeVar
+from typing import Any, Self, TypeVar
 
 from ..client import NotehubClient
 from ..observe import (
@@ -30,6 +30,28 @@ TaskT = TypeVar("TaskT")
 _RUN_IDS = count(1)
 
 
+class _ComponentEvents:
+    """Expose one pull-based iterator for the lifetime of its component."""
+
+    def __init__(self, iterator: AsyncIterator[Event]) -> None:
+        self._iterator: AsyncIterator[Event] | None = iterator
+
+    def __aiter__(self) -> Self:
+        return self
+
+    async def __anext__(self) -> Event:
+        iterator = self._iterator
+        if iterator is None:
+            raise RuntimeError("component context is closed")
+        event = await anext(iterator)
+        if self._iterator is None:
+            raise RuntimeError("component context is closed")
+        return event
+
+    def invalidate(self) -> None:
+        self._iterator = None
+
+
 class ComponentContext:
     """Communication facilities and lifetime-bound tasks for one component."""
 
@@ -47,7 +69,7 @@ class ComponentContext:
         self._name = name
         self._scope = scope
         self._client = client
-        self._events = events
+        self._events = _ComponentEvents(events)
         self._sink = sink
         self._task_group: asyncio.TaskGroup | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -81,7 +103,7 @@ class ComponentContext:
 
     @property
     def events(self) -> AsyncIterator[Event]:
-        """The run's single owned event iterator."""
+        """The run's pull-based event iterator, available until source cleanup."""
         return self._events
 
     async def emit(self, payload: object) -> None:
@@ -93,12 +115,18 @@ class ComponentContext:
     def spawn(
         self, coroutine: Coroutine[Any, Any, TaskT], *, name: str | None = None
     ) -> asyncio.Task[TaskT]:
-        """Start a child task whose lifetime is bounded by the hosted run."""
+        """Start a managed child, closing its coroutine if scheduling is rejected."""
         group = self._task_group
         if not self._open or not self._accepting_tasks or group is None:
             coroutine.close()
             raise RuntimeError("component is not accepting child tasks")
-        task = group.create_task(coroutine, name=name)
+        try:
+            task = group.create_task(coroutine, name=name)
+        except BaseException:
+            # TaskGroup can begin aborting before the host stops accepting tasks.
+            # Python 3.11/3.12 do not close coroutines rejected in that state.
+            coroutine.close()
+            raise
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
@@ -112,12 +140,14 @@ class ComponentContext:
 
     def _cancel_children(self) -> None:
         for task in tuple(self._tasks):
-            task.cancel()
+            if not task.cancelling():
+                task.cancel()
 
     def _close(self) -> None:
         self._accepting_tasks = False
         self._open = False
         self._task_group = None
+        self._events.invalidate()
 
 
 class ComponentHost:
@@ -162,6 +192,9 @@ class ComponentHost:
                     events=iterator,
                     sink=emit,
                 )
+                # TODO(hosting-shutdown): Design an opt-in diagnostic for a slow
+                # child join or iterator close. Exercise both phases and retain
+                # primary-error precedence and ownership of all pending work.
                 async with asyncio.TaskGroup() as tasks:
                     context._begin(tasks)
                     component_task = tasks.create_task(component(context), name=label)
@@ -169,7 +202,8 @@ class ComponentHost:
                         await component_task
                     finally:
                         context._stop_spawning()
-                        context._cancel_children()
+                    # TaskGroup handles cancellation on exceptional exits.
+                    context._cancel_children()
         except BaseException as error:
             primary = error
             terminal = (
@@ -181,8 +215,7 @@ class ComponentHost:
             terminal = ComponentFinished(run_id, name)
         finally:
             if context is not None:
-                context._stop_spawning()
-                context._cancel_children()
+                context._close()
             cleanup_error: BaseException | None = None
             if iterator is not None:
                 try:
@@ -192,8 +225,6 @@ class ComponentHost:
                             await close()
                 except BaseException as error:
                     cleanup_error = error
-            if context is not None:
-                context._close()
             if cleanup_error is not None:
                 if primary is None:
                     primary = cleanup_error

@@ -41,6 +41,7 @@ _PROTECTED = {
 
 # TODO; Might need to make this into a module.
 
+
 def readings(value: object) -> Mapping[str, Any]:
     """Freeze JSON readings while protecting fields owned by the simulation."""
     result = note_body(value)

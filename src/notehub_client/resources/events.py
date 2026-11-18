@@ -7,13 +7,13 @@ from typing import TYPE_CHECKING, TypeVar, cast
 
 from ..catalog import ContractKey
 from ..constants import DEFAULT_PAGE_SIZE
-from ..errors import NotehubResponseError
 from ..filters import CursorPagination, merge_query_params
 from ..helpers import encode_path_segments, require_collection
 from ..payloads import DecodedEvent, PayloadDecoder
+from ._pagination import iter_cursor_pages
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
     from ..typing import Event, EventsResponse, QueryFilter, QueryValue
     from .base import RequestClient
@@ -41,6 +41,9 @@ class EventsFacade:
         query = merge_query_params(filters, params)
         if pagination is not None:
             query = merge_query_params(query, pagination.to_query_params())
+        return await self._list_page(project_uid, query)
+
+    async def _list_page(self, project_uid: str, query: dict[str, QueryValue]) -> EventsResponse:
         query.setdefault("pageSize", DEFAULT_PAGE_SIZE)
         if "cursor" in query and {"pageNum", "sortBy", "sortOrder"} & query.keys():
             raise ValueError("cursor cannot be combined with pageNum or sorting")
@@ -48,6 +51,29 @@ class EventsFacade:
             "GET", encode_path_segments("projects", project_uid, "events"), params=query
         )
         return cast("EventsResponse", require_collection(payload, "events", paginated=True))
+
+    async def iter_pages(
+        self,
+        project_uid: str,
+        *,
+        filters: QueryFilter | None = None,
+        pagination: CursorPagination | None = None,
+        **params: QueryValue,
+    ) -> AsyncGenerator[EventsResponse, None]:
+        """Yield event pages, including empty pages, until ``has_more`` is false.
+
+        Supply cursor and page size in the query or via ``pagination``. Duplicate
+        keys are rejected. The query is resolved once at the start of iteration.
+        For a resumable read, save a nonempty ``next_cursor`` only after processing
+        the whole page, including the terminal page when it has a cursor.
+        """
+        query = merge_query_params(filters, params)
+        if pagination is not None:
+            query = merge_query_params(query, pagination.to_query_params())
+        async for page in iter_cursor_pages(
+            lambda page_query: self._list_page(project_uid, page_query), query, resource="Event"
+        ):
+            yield page
 
     async def iter(
         self,
@@ -57,27 +83,12 @@ class EventsFacade:
         pagination: CursorPagination | None = None,
         **params: QueryValue,
     ) -> AsyncIterator[Event]:
-        """Yield matching project events while following Notehub's cursors."""
-        current = pagination or CursorPagination()
-        seen = {current.cursor}
-        while True:
-            page = await self.list(
-                project_uid,
-                filters=filters,
-                pagination=current,
-                **params,
-            )
+        """Yield individual events while following the same cursors as iter_pages()."""
+        async for page in self.iter_pages(
+            project_uid, filters=filters, pagination=pagination, **params
+        ):
             for event in page["events"]:
                 yield event
-            if not page["has_more"]:
-                return
-            next_cursor = page.get("next_cursor")
-            if not next_cursor or next_cursor in seen:
-                raise NotehubResponseError(
-                    "Event cursor missing or repeated while more results remain"
-                )
-            seen.add(next_cursor)
-            current = CursorPagination(cursor=next_cursor, page_size=current.page_size)
 
     async def iter_decoded(
         self,

@@ -37,13 +37,33 @@ def test_literal_text_removes_terminal_sequences_without_parsing_markup() -> Non
 
 
 def test_sanitization_preserves_input_and_masks_nested_environment_values() -> None:
-    source = {"body": {"temperature": 21, "token": "private"}, "environment": {"KEY": "secret"}}
+    source = {
+        "body": {
+            "temperature": 21,
+            "token_count": 12,
+            "token": "private",
+            "children": [{"clientSecret": "private", "api-key": "private"}],
+        },
+        "environment": {"KEY": "secret"},
+        "environment_variables": {"MODE": "active"},
+        "environment_variables_effective": {"MODE": "active", "OTHER": "value"},
+        "environment_variables_env_default": {"MODE": "default"},
+    }
     safe = sanitize_record(source)
     assert safe == {
-        "body": {"temperature": 21, "token": "[redacted]"},
+        "body": {
+            "temperature": 21,
+            "token_count": 12,
+            "token": "[redacted]",
+            "children": [{"clientSecret": "[redacted]", "api-key": "[redacted]"}],
+        },
         "environment": {"KEY": "[masked]"},
+        "environment_variables": {"MODE": "[masked]"},
+        "environment_variables_effective": {"MODE": "[masked]", "OTHER": "[masked]"},
+        "environment_variables_env_default": {"MODE": "[masked]"},
     }
     assert source["environment"]["KEY"] == "secret"
+    assert source["environment_variables_effective"]["OTHER"] == "value"
 
 
 def test_json_preview_bounds_utf8_without_changing_input() -> None:

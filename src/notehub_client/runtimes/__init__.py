@@ -3,39 +3,37 @@
 from __future__ import annotations
 
 from importlib import import_module
+from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from .typing import RuntimeModule
 
-# TODO: Are we "hiding" this because it's mutable?
-_RUNTIMES: dict[str, str] = {
-    "cli": "notehub_client.runtimes.cli",
-    "tui": "notehub_client.runtimes.tui",
-    "api": "notehub_client.runtimes.api.server",  # TODO: Why is this different than the others?
-    "web": "notehub_client.runtimes.web",
-    "mcp": "notehub_client.runtimes.mcp",
-}
+# Public metadata is safe to inspect without importing optional runtime packages.
+# The API package owns the shared ASGI app; its server module owns CLI startup.
+RUNTIMES: Mapping[str, str] = MappingProxyType(
+    {
+        "cli": "notehub_client.runtimes.cli",
+        "tui": "notehub_client.runtimes.tui",
+        "api": "notehub_client.runtimes.api.server",
+        "web": "notehub_client.runtimes.web",
+        "mcp": "notehub_client.runtimes.mcp",
+    }
+)
 
 
 def runtime_names() -> tuple[str, ...]:
     """Return the names accepted by the package runtime dispatcher."""
-    return tuple(
-        _RUNTIMES
-    )  # TODO: Why don't we just freeze and make `_RUNTIMES` be `RUNTIMES` ; if someone then
-    #   wants it they can get it.
-
-
-# TODO: We have so much crazy stuff in here that I don't think we need? Or might be better in helpers?
+    return tuple(RUNTIMES)
 
 
 def _load_runtime(name: str) -> RuntimeModule:
     try:
-        module_path = _RUNTIMES[name]
+        module_path = RUNTIMES[name]
     except KeyError:
-        raise ValueError(f"Unknown runtime {name!r}; choose from {', '.join(_RUNTIMES)}.") from None
+        raise ValueError(f"Unknown runtime {name!r}; choose from {', '.join(RUNTIMES)}.") from None
 
     module = cast("RuntimeModule", import_module(module_path))
     return module
@@ -46,4 +44,4 @@ def run_runtime(name: str, args: Sequence[str] | None = None) -> None:
     _load_runtime(name).main(args)
 
 
-__all__ = ["run_runtime", "runtime_names"]
+__all__ = ["RUNTIMES", "run_runtime", "runtime_names"]

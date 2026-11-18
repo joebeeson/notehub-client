@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -22,6 +24,7 @@ _PREFERRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "projects": ("uid", "label", "role", "created"),
     "devices": ("uid", "best_id", "product_uid", "serial_number", "last_activity"),
     "events": ("when", "device", "file", "event", "sensor"),
+    "sessions": ("session", "session_began", "session_ended", "transport"),
 }
 _TITLES = {
     "projects": "🗂️  Projects",
@@ -44,6 +47,9 @@ _LABELS = {
     "device": "Device",
     "file": "Notefile",
     "event": "Event",
+    "session": "Session UID",
+    "session_began": "Started",
+    "session_ended": "Ended",
     "sensor": "Sensor",
     "name": "Variable",
     "value": "Value",
@@ -94,6 +100,21 @@ def emit_result(
 def emit_ndjson(value: object, *, show_secrets: bool = False) -> None:
     """Write one event record as a compact JSON line."""
     click_echo(_json(_sanitize(value, show_secrets=show_secrets)))
+
+
+def save_checkpoint(path: Path, cursor: str) -> None:
+    """Replace a cursor file only after its new contents are written."""
+    temporary = None
+    try:
+        with NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(cursor)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _emit_human(
@@ -206,14 +227,13 @@ def _print_key_values(console: Console, value: Mapping[str, Any], *, title: str)
 
 
 def _print_page_status(console: Console, response: Mapping[str, Any]) -> None:
-    if response.get("has_more"):
-        message = Text("↪ More results")
-        cursor = response.get("next_cursor")
-        if cursor is not None:
-            message.append(f" · next cursor {cursor}")
-        console.print(message, style="dim")
-    else:
-        console.print(Text("✓ End of results", style="dim"))
+    has_more = response.get("has_more")
+    message = Text("↪ More results" if has_more else "✓ End of results")
+    cursor = response.get("next_cursor")
+    if isinstance(cursor, str) and cursor:
+        label = "next" if has_more else "resume"
+        message.append(f" · {label} cursor {cursor}")
+    console.print(message, style="dim")
 
 
 def _records(value: object, records_key: str | None) -> list[Mapping[str, Any]]:

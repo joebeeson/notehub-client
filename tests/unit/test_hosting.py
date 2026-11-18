@@ -23,6 +23,41 @@ class Failure(NotehubError):
     pass
 
 
+@pytest.mark.asyncio
+async def test_spawn_rejection_during_group_shutdown_closes_coroutine() -> None:
+    rejected = []
+
+    async def fail() -> None:
+        raise Failure("child")
+
+    async def sink(_: hosting.ComponentEmission) -> None:
+        pass
+
+    async def component(context: hosting.ComponentContext) -> None:
+        context.spawn(fail())
+        try:
+            await asyncio.Event().wait()
+        finally:
+            coroutine = asyncio.sleep(0)
+            rejected.append(coroutine)
+            with pytest.raises(RuntimeError):
+                context.spawn(coroutine)
+
+    async with NotehubClient("token") as client:
+        with pytest.raises(ExceptionGroup) as caught:
+            await hosting.ComponentHost(client).run(
+                component, name="shutdown", scope=scope(), events=event_source(), emit=sink
+            )
+    try:
+        assert any(isinstance(error, Failure) for error in caught.value.exceptions)
+        assert len(rejected) == 1
+        assert getattr(rejected[0], "cr_frame") is None
+    finally:
+        # Avoid an unawaited-coroutine warning when exercising the regression.
+        for coroutine in rejected:
+            coroutine.close()
+
+
 def scope() -> hosting.ComponentScope:
     return hosting.ComponentScope(project_uid="app:test", fleet_uid="fleet:one")
 
@@ -207,6 +242,46 @@ async def test_child_failure_propagates_and_cancels_component() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_child_allows_sibling_to_finish_async_cleanup() -> None:
+    sibling_ready = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    async def sink(_: hosting.ComponentEmission) -> None:
+        pass
+
+    async def sibling() -> None:
+        sibling_ready.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_started.set()
+            # Keep the finalizer suspended while the component exits.
+            await asyncio.sleep(0.01)
+            cleanup_finished.set()
+
+    async def fail() -> None:
+        await sibling_ready.wait()
+        raise Failure("child")
+
+    async def component(context: hosting.ComponentContext) -> None:
+        context.spawn(sibling())
+        context.spawn(fail())
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await cleanup_started.wait()
+
+    async with NotehubClient("token") as client:
+        with pytest.raises(ExceptionGroup) as failure:
+            await hosting.ComponentHost(client).run(
+                component, name="worker", scope=scope(), events=event_source(), emit=sink
+            )
+    assert any(isinstance(error, Failure) for error in failure.value.exceptions)
+    assert cleanup_finished.is_set()
+
+
+@pytest.mark.asyncio
 async def test_caller_cancellation_closes_iterator_and_runs_child_finalizer() -> None:
     client = NotehubClient("token")
     started = asyncio.Event()
@@ -342,6 +417,62 @@ async def test_emit_is_rejected_after_run_and_scope_validation() -> None:
         await client.aclose()
     with pytest.raises(ValueError):
         hosting.ComponentScope(project_uid="")
+
+
+@pytest.mark.asyncio
+async def test_context_rejects_late_reads_and_emissions_while_source_is_closing() -> None:
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+    event: Event = {"event": "from-source"}
+    pulls = 0
+    saved: list[tuple[hosting.ComponentContext, AsyncIterator[Event]]] = []
+
+    class Source:
+        def __aiter__(self) -> Source:
+            return self
+
+        async def __anext__(self) -> Event:
+            nonlocal pulls
+            pulls += 1
+            return event
+
+        async def aclose(self) -> None:
+            close_started.set()
+            await allow_close.wait()
+
+    async def component(context: hosting.ComponentContext) -> None:
+        iterator = context.events
+        assert context.events is iterator
+        assert await anext(iterator) is event
+        saved.append((context, iterator))
+
+    async def sink(_: hosting.ComponentEmission) -> None:
+        pytest.fail("A closed context must not emit")
+
+    async with NotehubClient("token") as client, asyncio.TaskGroup() as group:
+        run = group.create_task(
+            hosting.ComponentHost(client).run(
+                component,
+                name="closing",
+                scope=scope(),
+                events=Source(),
+                emit=sink,
+            )
+        )
+        try:
+            await asyncio.wait_for(close_started.wait(), timeout=2)
+            context, iterator = saved[0]
+            with pytest.raises(RuntimeError, match="context is closed"):
+                await anext(iterator)
+            with pytest.raises(RuntimeError, match="context is closed"):
+                await context.emit("late")
+            assert not run.done()
+        finally:
+            allow_close.set()
+        await run
+        with pytest.raises(RuntimeError, match="context is closed"):
+            await anext(iterator)
+        assert pulls == 1
 
 
 @pytest.mark.asyncio

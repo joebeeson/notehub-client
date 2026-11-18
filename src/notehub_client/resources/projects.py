@@ -31,6 +31,7 @@ class ProjectsFacade:
         self._devices = devices if devices is not None else DevicesFacade(client)
 
     def __getitem__(self, project_uid: str) -> ProjectHandle:
+        """Bind a project UID without making an API request."""
         return ProjectHandle(project_uid, self, ProjectDevices(project_uid, self._devices))
 
     async def get(self, project_uid: str) -> Project:
@@ -40,6 +41,7 @@ class ProjectsFacade:
             require_json_object(
                 await self._client.request("GET", encode_path_segments("projects", project_uid)),
                 "project",
+                require_uid=True,
             ),
         )
 
@@ -55,24 +57,31 @@ class ProjectsFacade:
                 ),
                 "projects",
                 optional=True,
+                require_uid=True,
             ),
         )
 
 
 @dataclass(frozen=True, slots=True)
 class ProjectDevices:
+    """Device lookups bound to one project and its client's device facade."""
+
     project_uid: str
     _devices: DevicesFacade
 
     def __getitem__(self, device_uid: str) -> DeviceHandle:
+        """Bind a device UID within this project without making a request."""
         return self._devices[self.project_uid, device_uid]
 
 
 @dataclass(frozen=True, slots=True)
 class ProjectHandle:
+    """A project address with access to the owning client's resource operations."""
+
     project_uid: str
     _projects: ProjectsFacade
     devices: ProjectDevices
 
     async def get(self) -> Project:
+        """Fetch the current project record."""
         return await self._projects.get(self.project_uid)

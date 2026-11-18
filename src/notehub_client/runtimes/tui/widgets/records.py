@@ -10,10 +10,16 @@ from textual.widgets import DataTable, Label
 from ..presentation import safe_string, safe_text
 from ..state import PageResult
 
+RecordField = str | tuple[str, ...]
 
-def display_field(record: dict[str, Any], key: str, missing: str = "not reported") -> str:
+
+def display_field(record: dict[str, Any], key: RecordField, missing: str = "not reported") -> str:
     """Format an optional source field without implying absent values."""
-    value = record.get(key)
+    value: Any = record
+    for part in (key,) if isinstance(key, str) else key:
+        if not isinstance(value, dict):
+            return missing
+        value = value.get(part)
     return missing if value is None or value == "" else safe_string(value)
 
 
@@ -50,7 +56,7 @@ def record_table(
 def populate_record_table(
     table: DataTable,
     page: PageResult | None,
-    fields: tuple[str, ...],
+    fields: tuple[RecordField, ...],
     empty_label: Label,
 ) -> None:
     """Replace a mounted detail table without rebuilding its parent screen."""

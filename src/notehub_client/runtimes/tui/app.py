@@ -243,6 +243,8 @@ class NotehubApp(App[None]):
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Keep ordinary shortcut letters available to text editors."""
+        # Textual's override signature includes arguments; this policy uses only focus/action.
+        del parameters
         if isinstance(self.focused, (Input, TextArea)) and action in {
             "navigate",
             "refresh",
@@ -340,6 +342,7 @@ class NotehubApp(App[None]):
         self.project_uid = project.project_uid
         self.generation += 1
         self.states.clear()
+        self._cursor_histories.clear()
         self.device_records.clear()
         self.fleet_records.clear()
         self.detail_results.clear()
@@ -543,7 +546,9 @@ class NotehubApp(App[None]):
         self.operation = "device"
         self._configure_sections()
         self._sync_view_host()
-        self.query_one(DeviceDetailView).set_device(message.device)
+        detail = self.query_one(DeviceDetailView)
+        detail.query_one(TabbedContent).active = "device-overview"
+        detail.set_device(message.device)
         self._restore_or_load()
 
     @on(FleetListView.Selected)
@@ -558,7 +563,9 @@ class NotehubApp(App[None]):
         self.operation = "fleets"
         self._configure_sections()
         self._sync_view_host()
-        self.query_one(FleetDetailView).set_fleet(message.fleet)
+        detail = self.query_one(FleetDetailView)
+        detail.query_one(TabbedContent).active = "fleet-overview"
+        detail.set_fleet(message.fleet)
         self._restore_or_load()
 
     @property
@@ -640,15 +647,25 @@ class NotehubApp(App[None]):
         detail = self.query_one(DeviceDetailView)
         for section in ("latest", "sessions", "environment", "events"):
             page = self.detail_results.get((self.project_uid, ViewId.DEVICES, uid, section))
-            if page is not None:
-                detail.set_section_result(section, page)
+            detail.set_section_result(section, page)
 
     def _apply_fleet_detail_cache(self, uid: str) -> None:
         detail = self.query_one(FleetDetailView)
-        for section in ("devices", "events"):
-            page = self.detail_results.get((self.project_uid, ViewId.FLEETS, uid, section))
-            if page is not None:
-                detail.set_section_result(section, page)
+        page = self.detail_results.get((self.project_uid, ViewId.FLEETS, uid, "devices"))
+        detail.set_section_result("devices", page)
+        self._render_fleet_events(uid)
+
+    def _fleet_event_history_key(self, uid: str) -> tuple[str | None, ViewId, str, str, Query]:
+        query = self.states.get(("events", uid), ViewState()).query
+        return self.project_uid, ViewId.FLEETS, "events", uid, query
+
+    def _render_fleet_events(self, uid: str) -> None:
+        pager = self._cursor_histories.setdefault(
+            self._fleet_event_history_key(uid), CursorHistory()
+        )
+        detail = self.query_one(FleetDetailView)
+        detail.set_section_result("events", pager.current)
+        detail.set_event_navigation(previous=pager.can_previous, following=pager.can_next)
 
     def _request_detail_section(
         self,
@@ -657,9 +674,23 @@ class NotehubApp(App[None]):
         section: str,
         *,
         refresh: bool = False,
+        page_num: int | None = None,
+        cursor: str | None = None,
     ) -> None:
         """Serve a cached detail page or schedule one app-owned read."""
+        self.operation = section
+        self.generation += 1
+        self.workers.cancel_group(self, "view")
         cache_key = (self.project_uid, view, uid, section)
+        if view == ViewId.FLEETS and section == "events":
+            pager = self._cursor_histories.get(self._fleet_event_history_key(uid))
+            if pager is not None and pager.current is not None and not refresh and cursor is None:
+                self._render_fleet_events(uid)
+                return
+            if pager is None:
+                self._render_fleet_events(uid)
+            self._read_detail_section(view, uid, section, self.generation, 1, cursor or "0")
+            return
         if view == ViewId.DEVICES and section == "device":
             cached_record = self.device_records.get((self.project_uid, uid))
             if cached_record is not None and not refresh:
@@ -667,7 +698,7 @@ class NotehubApp(App[None]):
                 return
         else:
             cached_page = self.detail_results.get(cache_key)
-            if cached_page is not None and not refresh:
+            if cached_page is not None and not refresh and page_num is None:
                 if view == ViewId.DEVICES:
                     self.query_one(DeviceDetailView).set_section_result(section, cached_page)
                 else:
@@ -676,15 +707,20 @@ class NotehubApp(App[None]):
                     f"Cached {section} details · checked {cached_page.checked_at:%H:%M:%S} UTC"
                 )
                 return
+            if page_num is None and cached_page is not None:
+                page_num = cached_page.page_num
 
-        self.operation = section
-        self.generation += 1
-        self.workers.cancel_group(self, "view")
-        self._read_detail_section(view, uid, section, self.generation)
+        self._read_detail_section(view, uid, section, self.generation, page_num or 1)
 
     @work(exclusive=True, group="view", exit_on_error=False)
     async def _read_detail_section(
-        self, view: ViewId, uid: str, section: str, generation: int
+        self,
+        view: ViewId,
+        uid: str,
+        section: str,
+        generation: int,
+        page_num: int,
+        cursor: str = "0",
     ) -> None:
         """Read one detail section and apply it only to its original scope."""
         service = self.service
@@ -694,6 +730,9 @@ class NotehubApp(App[None]):
             return
         operation = section
         query = Query()
+        event_key = self._fleet_event_history_key(uid)
+        if view == ViewId.FLEETS and section == "events":
+            query = event_key[-1]
         if view == ViewId.DEVICES and section == "events":
             query = query.devices(uid)
         elif view == ViewId.FLEETS:
@@ -705,6 +744,8 @@ class NotehubApp(App[None]):
                 project_uid=project_uid,
                 uid=uid,
                 query=query,
+                page_num=page_num,
+                cursor=cursor,
             )
         except asyncio.CancelledError:
             raise
@@ -730,6 +771,21 @@ class NotehubApp(App[None]):
             self.query_one(DeviceDetailView).set_device(dict(record))
             self._status("Device details checked")
             return
+        if view == ViewId.FLEETS and section == "events":
+            pager = (
+                CursorHistory()
+                if cursor == "0"
+                else self._cursor_histories.setdefault(event_key, CursorHistory())
+            )
+            try:
+                pager.append(cursor, page)
+            except NotehubResponseError:
+                self._status("Cursor unavailable or repeated. Refresh with r to restart.")
+                return
+            self._cursor_histories[event_key] = pager
+            self._render_fleet_events(uid)
+            self._status(f"Events details checked · {len(page.rows)} returned")
+            return
         self.detail_results[(project_uid, view, uid, section)] = page
         if view == ViewId.DEVICES:
             self.query_one(DeviceDetailView).set_section_result(section, page)
@@ -743,11 +799,61 @@ class NotehubApp(App[None]):
         if self.view == ViewId.DEVICES and message.device_uid == self.uid:
             self._request_detail_section(ViewId.DEVICES, message.device_uid, message.section)
 
+    @on(DeviceDetailView.SessionPageRequested)
+    def device_session_page_requested(self, message: DeviceDetailView.SessionPageRequested) -> None:
+        """Navigate from the last successful page in this device's Sessions tab."""
+        uid = message.device_uid
+        if self.view != ViewId.DEVICES or self.uid != uid:
+            return
+        current = self.detail_results.get((self.project_uid, ViewId.DEVICES, uid, "sessions"))
+        if current is None or current.page_num is None:
+            return
+        if message.forward and current.has_more is not True:
+            return
+        target = current.page_num + (1 if message.forward else -1)
+        if target >= 1:
+            self._request_detail_section(ViewId.DEVICES, uid, "sessions", page_num=target)
+
     @on(FleetDetailView.SectionSelected)
     def fleet_detail_section_selected(self, message: FleetDetailView.SectionSelected) -> None:
         """Load a fleet tab through the app-owned service and worker."""
         if self.view == ViewId.FLEETS and message.fleet_uid == self.uid:
             self._request_detail_section(ViewId.FLEETS, message.fleet_uid, message.section)
+
+    @on(FleetDetailView.DevicePageRequested)
+    def fleet_device_page_requested(self, message: FleetDetailView.DevicePageRequested) -> None:
+        """Navigate from this fleet's last successful member-device page."""
+        uid = message.fleet_uid
+        if self.view != ViewId.FLEETS or self.uid != uid:
+            return
+        current = self.detail_results.get((self.project_uid, ViewId.FLEETS, uid, "devices"))
+        if current is None or current.page_num is None:
+            return
+        if message.forward and current.has_more is not True:
+            return
+        target = current.page_num + (1 if message.forward else -1)
+        if target >= 1:
+            self._request_detail_section(ViewId.FLEETS, uid, "devices", page_num=target)
+
+    @on(FleetDetailView.EventPageRequested)
+    def fleet_event_page_requested(self, message: FleetDetailView.EventPageRequested) -> None:
+        """Use retained pages before fetching a new fleet event cursor."""
+        uid = message.fleet_uid
+        if self.view != ViewId.FLEETS or self.uid != uid:
+            return
+        pager = self._cursor_histories.get(self._fleet_event_history_key(uid))
+        if pager is None:
+            return
+        if not (pager.can_next if message.forward else pager.can_previous):
+            return
+        self.generation += 1
+        self.workers.cancel_group(self, "view")
+        page = pager.forward() if message.forward else pager.previous()
+        if page is not None:
+            self._render_fleet_events(uid)
+            self._status("Cached fleet events")
+        else:
+            self._request_detail_section(ViewId.FLEETS, uid, "events", cursor=pager.next_cursor)
 
     def _restore_or_load(self) -> None:
         self.workers.cancel_group(self, "view")
@@ -842,14 +948,14 @@ class NotehubApp(App[None]):
             if self._uses_cursor_paging():
                 pager = self._cursor_history()
                 if request_cursor == "0" and pager.current is not None:
-                    # Commit a refresh only after its first page succeeds. A failed
-                    # refresh therefore leaves the last-good page history usable.
-                    pager.reset()
+                    # Validate the replacement before discarding last-good history.
+                    pager = CursorHistory(capacity=pager.capacity)
                 try:
                     pager.append(request_cursor, page)
                 except NotehubResponseError:
                     self._status("Cursor unavailable or repeated. Refresh with r to restart.")
                     return
+                self._cursor_histories[self._cursor_history_key()] = pager
             self.result = page
             self.states[self._key()] = replace(state, cursor=request_cursor, result=page)
             self._render_rows()
@@ -1259,6 +1365,7 @@ class NotehubApp(App[None]):
         self.signals_visible = False
         self._update_signals()
         self.states.clear()
+        self._cursor_histories.clear()
         self.device_records.clear()
         self.fleet_records.clear()
         self.detail_results.clear()

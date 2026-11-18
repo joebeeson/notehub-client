@@ -199,7 +199,7 @@ The CLI and MCP server use `NOTEHUB_TOKEN`; the dashboard also lets you enter a 
 
 The **[Wiki](https://github.com/joebeeson/notehub-client/wiki)** has room to explore: walkthroughs, API details, and guidance for building on the client. Named operations cover common Notehub tasks; [custom API requests](https://github.com/joebeeson/notehub-client/wiki/Custom-API-Requests) take you further.
 
-Have something in mind? **[Share an idea or report a problem](https://github.com/joebeeson/notehub-client/issues)**, or **[join the development](https://github.com/joebeeson/notehub-client/wiki/Contributing)**.
+Have something in mind? **[Share an idea or report a problem](https://github.com/joebeeson/notehub-client/issues)**, or **[set up a development checkout](CONTRIBUTING.md)**.
 
 ---
 

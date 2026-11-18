@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from textual import on
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.message import Message
-from textual.widgets import DataTable, Label, TabbedContent, TabPane
+from textual.widgets import Button, DataTable, Label, TabbedContent, TabPane
 
 from ..state import PageResult
 from ..widgets.records import display_field, populate_record_table, record_table
@@ -70,12 +71,25 @@ class DeviceListView(Vertical):
 class DeviceDetailView(Vertical):
     """A device report with lazily requested, independent detail sections."""
 
+    DEFAULT_CSS = """
+    #device-sessions-pagination { height: auto; align-vertical: middle; }
+    #device-sessions-page { width: auto; margin: 0 1; }
+    """
+
     class SectionSelected(Message):
         """A detail section became active; the app may issue its read."""
 
         def __init__(self, device_uid: str, section: str) -> None:
             super().__init__()
             self.device_uid, self.section = device_uid, section
+
+    class SessionPageRequested(Message):
+        """Move one page from the currently displayed session results."""
+
+        def __init__(self, device_uid: str, *, forward: bool) -> None:
+            super().__init__()
+            self.device_uid = device_uid
+            self.forward = forward
 
     def __init__(
         self,
@@ -92,8 +106,8 @@ class DeviceDetailView(Vertical):
         self.latest, self.sessions = latest, sessions
         self.environment, self.events = environment, events
 
-    def set_section_result(self, section: str, page: PageResult) -> None:
-        """Install a lazily fetched detail result without owning the request."""
+    def set_section_result(self, section: str, page: PageResult | None) -> None:
+        """Install or clear a detail result without owning the request."""
         if section not in {"latest", "sessions", "environment", "events"}:
             raise ValueError("Unknown device detail section")
         setattr(self, section, page)
@@ -156,7 +170,7 @@ class DeviceDetailView(Vertical):
             with TabPane("Sessions", id="device-sessions"):
                 yield Label("Reported sessions", classes="resource-heading")
                 yield self._make_table(
-                    "device-sessions-table", ("Session UID", "Started", "Duration")
+                    "device-sessions-table", ("Session UID", "Started", "Duration (s)")
                 )
                 yield Label(
                     "Select this tab to load records.",
@@ -164,6 +178,10 @@ class DeviceDetailView(Vertical):
                     classes="resource-empty",
                 )
                 yield Label("", id="device-sessions-hint", classes="resource-page-hint")
+                with Horizontal(id="device-sessions-pagination"):
+                    yield Button("Previous", id="device-sessions-previous", disabled=True)
+                    yield Label("", id="device-sessions-page")
+                    yield Button("Next", id="device-sessions-next", disabled=True)
             with TabPane("Environment keys", id="device-environment"):
                 yield Label("Environment values are not displayed.")
                 yield Label("Variable names", classes="resource-heading")
@@ -199,9 +217,22 @@ class DeviceDetailView(Vertical):
 
     def _render_section(self, section: str) -> None:
         page = getattr(self, section)
+        if section == "sessions":
+            pager = self.query_one("#device-sessions-pagination", Horizontal)
+            number = self.sessions.page_num if self.sessions is not None else None
+            pager.display = number is not None
+            self.query_one("#device-sessions-page", Label).update(
+                f"Page {number}" if number else ""
+            )
+            self.query_one("#device-sessions-previous", Button).disabled = (
+                number is None or number <= 1
+            )
+            self.query_one("#device-sessions-next", Button).disabled = (
+                number is None or self.sessions is None or self.sessions.has_more is not True
+            )
         fields = {
             "latest": ("file", "event", "when"),
-            "sessions": ("uid", "when", "duration"),
+            "sessions": ("session", "session_began", ("period", "duration")),
             "environment": ("name", "scope"),
             "events": ("file", "event", "when"),
         }[section]
@@ -226,7 +257,7 @@ class DeviceDetailView(Vertical):
         hint = self.query_one(f"#device-{section}-hint", Label)
         hint_text = (
             "More records are available on the next page."
-            if page.has_more is True
+            if page.has_more is True and (section != "sessions" or page.page_num is None)
             else "Returned records; total availability was not reported."
             if page.has_more is None
             else ""
@@ -235,6 +266,16 @@ class DeviceDetailView(Vertical):
         hint.display = bool(hint_text)
         if not table.row_count:
             table.display = False
+
+    @on(Button.Pressed, "#device-sessions-previous, #device-sessions-next")
+    def request_session_page(self, event: Button.Pressed) -> None:
+        """Request another session page through the owning app."""
+        event.stop()
+        self.post_message(
+            self.SessionPageRequested(
+                self.device_uid, forward=event.button.id == "device-sessions-next"
+            )
+        )
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         """Notify the app to lazily load a not-yet-cached detail section."""

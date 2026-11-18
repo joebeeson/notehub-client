@@ -2,8 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
-from textual.widgets import Button, ContentSwitcher, DataTable, Input, Select, Static, TabbedContent
+from rich.text import Text
+from textual.content import Content
+from textual.widgets import (
+    Button,
+    ContentSwitcher,
+    DataTable,
+    Input,
+    Label,
+    Select,
+    Static,
+    TabbedContent,
+)
 
 from notehub_client.errors import NotehubAPIError, NotehubRateLimitError
 from notehub_client.filters import Query
@@ -22,7 +35,9 @@ async def test_demo_launch_is_credential_free_and_reads_only_after_project_choic
     app = NotehubApp(options=TUIOptions(demo=True))
     async with app.run_test(size=(140, 42)) as pilot:
         await pilot.pause()
-        assert app.query_one("#brand", Static).render().plain == "NOTEHUB / DEMO"
+        brand = app.query_one("#brand", Static).render()
+        assert isinstance(brand, (Text, Content))
+        assert brand.plain == "NOTEHUB / DEMO"
         assert app.query_one("#login").display is False
         assert app.project_uid is None
         assert isinstance(app.service, DemoReadService)
@@ -46,7 +61,9 @@ async def test_navigation_and_current_page_search_use_loaded_demo_data() -> None
     async with app.run_test(size=(140, 42)) as pilot:
         await pilot.pause(0.1)
         assert app.query_one(OverviewPanel).events
-        reads_before = tuple(app.service.reads)
+        service = app.service
+        assert isinstance(service, DemoReadService)
+        reads_before = tuple(service.reads)
 
         await pilot.click("#nav-events")
         await pilot.pause(0.1)
@@ -59,7 +76,7 @@ async def test_navigation_and_current_page_search_use_loaded_demo_data() -> None
         await pilot.press(*list("sensor:demo-temperature"))
         await pilot.pause()
         assert app.query_one("#records", DataTable).row_count <= 50
-        assert tuple(app.service.reads) == reads_before + ("events",)
+        assert tuple(service.reads) == reads_before + ("events",)
 
 
 @pytest.mark.asyncio
@@ -138,7 +155,7 @@ async def test_device_detail_tabs_load_through_app_and_show_environment_names_on
                 )
 
         service = RawEnvironmentService()
-        app.service = service  # type: ignore[assignment]
+        app.service = service
         await pilot.click("#nav-devices")
         await pilot.pause(0.1)
         device_list = app.query_one(DeviceListView)
@@ -188,6 +205,132 @@ async def test_device_detail_tabs_load_through_app_and_show_environment_names_on
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["device", "fleet"])
+async def test_detail_pages_preserve_scope_when_a_read_finishes_after_navigation(kind: str) -> None:
+    section = "sessions" if kind == "device" else "devices"
+    operation_name = "sessions" if kind == "device" else "fleet_devices"
+    list_type = DeviceListView if kind == "device" else FleetListView
+    detail_type = DeviceDetailView if kind == "device" else FleetDetailView
+
+    class SessionsService(DemoReadService):
+        def __init__(self) -> None:
+            super().__init__()
+            self.session_requests: list[tuple[str, int]] = []
+            self.pending = asyncio.Event()
+            self.returned_after_cancel = False
+
+        async def read(
+            self,
+            operation: str,
+            *,
+            project_uid: str | None = None,
+            uid: str | None = None,
+            query: Query | None = None,
+            cursor: str = "0",
+            page_num: int = 1,
+        ) -> PageResult:
+            if operation == "fleets":
+                return PageResult(
+                    rows=({"uid": "fleet:first"}, {"uid": "fleet:second"}),
+                    row_keys=("fleet:first", "fleet:second"),
+                    has_more=False,
+                )
+            if operation != operation_name:
+                return await super().read(
+                    operation,
+                    project_uid=project_uid,
+                    uid=uid,
+                    query=query,
+                    cursor=cursor,
+                    page_num=page_num,
+                )
+            assert uid is not None
+            self.session_requests.append((uid, page_num))
+            if page_num == 3:
+                self.pending.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.returned_after_cancel = True
+            key = f"{uid}-page-{page_num}"
+            return PageResult(
+                rows=({"session" if kind == "device" else "uid": key},),
+                row_keys=(key,),
+                page_num=page_num,
+                has_more=uid == self.session_requests[0][0] and page_num < 3,
+            )
+
+    app = NotehubApp(options=TUIOptions(demo=True, project_uid=DEMO_PROJECT_UID))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.1)
+        service = SessionsService()
+        app.service = service
+        await pilot.click(f"#nav-{kind}s")
+        await pilot.pause(0.1)
+        detail = app.query_one(detail_type)
+        tabs = detail.query_one(TabbedContent)
+
+        async def open_sessions(row: int) -> str:
+            table = app.query_one(list_type).query_one(DataTable)
+            table.move_cursor(row=row)
+            table.focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            tabs.active = f"{kind}-{section}"
+            await pilot.pause()
+            return getattr(detail, f"{kind}_uid")
+
+        first = await open_sessions(0)
+        previous = detail.query_one(f"#{kind}-{section}-previous", Button)
+        following = detail.query_one(f"#{kind}-{section}-next", Button)
+        number = detail.query_one(f"#{kind}-{section}-page", Label)
+        assert previous.disabled and not following.disabled
+        await pilot.click(following)
+        await pilot.pause()
+        assert str(number.content) == "Page 2"
+        assert not previous.disabled
+        app.action_refresh()
+        await pilot.pause()
+        assert str(number.content) == "Page 2"
+        await pilot.click(previous)
+        await pilot.pause()
+        assert str(number.content) == "Page 1"
+        await pilot.click(following)
+        await pilot.pause()
+        assert str(number.content) == "Page 2"
+        following.press()
+        await asyncio.wait_for(service.pending.wait(), timeout=2)
+
+        await pilot.press("escape")
+        await pilot.pause()
+        second = await open_sessions(1)
+        assert first != second
+        assert service.returned_after_cancel
+        assert str(number.content) == "Page 1"
+        assert previous.disabled and following.disabled
+        assert getattr(detail, section) is not None and getattr(detail, section).row_keys == (
+            f"{second}-page-1",
+        )
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert await open_sessions(0) == first
+        assert str(number.content) == "Page 2"
+        assert getattr(detail, section) is not None and getattr(detail, section).row_keys == (
+            f"{first}-page-2",
+        )
+        assert service.session_requests == [
+            (first, 1),
+            (first, 2),
+            (first, 2),
+            (first, 1),
+            (first, 2),
+            (first, 3),
+            (second, 1),
+        ]
+
+
+@pytest.mark.asyncio
 async def test_fleet_detail_sections_load_and_back_restores_fleet_selection() -> None:
     """Fleet member/event tabs load lazily and Escape returns to the chosen fleet."""
     app = NotehubApp(options=TUIOptions(demo=True, project_uid=DEMO_PROJECT_UID))
@@ -215,6 +358,15 @@ async def test_fleet_detail_sections_load_and_back_restores_fleet_selection() ->
         service = app.service
         assert isinstance(service, DemoReadService)
         assert service.reads.count("fleet_devices") == 1
+        assert service.reads.count("fleet_events") == 1
+
+        tabs.active = "fleet-devices"
+        await pilot.pause()
+        assert app.operation == "devices"
+        assert service.reads.count("fleet_devices") == 1
+        app.action_refresh()
+        await pilot.pause()
+        assert service.reads.count("fleet_devices") == 2
         assert service.reads.count("fleet_events") == 1
 
         await pilot.press("escape")
@@ -257,14 +409,30 @@ async def test_old_generation_result_is_discarded_after_scope_change() -> None:
         class DelayedService:
             reads: list[str] = []
 
-            async def read(self, operation: str, **kwargs: object):
+            async def read(
+                self,
+                operation: str,
+                *,
+                project_uid: str | None = None,
+                uid: str | None = None,
+                query: Query | None = None,
+                cursor: str = "0",
+                page_num: int = 1,
+            ) -> PageResult:
                 if operation == "events" and not entered.is_set():
                     entered.set()
                     await release.wait()
                 self.reads.append(operation)
-                return await original.read(operation, **kwargs)
+                return await original.read(
+                    operation,
+                    project_uid=project_uid,
+                    uid=uid,
+                    query=query,
+                    cursor=cursor,
+                    page_num=page_num,
+                )
 
-        app.service = DelayedService()  # type: ignore[assignment]
+        app.service = DelayedService()
         app.project_uid = DEMO_PROJECT_UID
         app.action_navigate("events")
         await entered.wait()
@@ -284,13 +452,15 @@ async def test_signal_and_inbox_controls_are_present_and_session_local() -> None
     app = NotehubApp(options=TUIOptions(demo=True, project_uid=DEMO_PROJECT_UID))
     async with app.run_test(size=(140, 42)) as pilot:
         await pilot.pause(0.1)
-        assert app.query_one("#signals", Button).label.plain == "Signals"
-        assert app.query_one("#inbox", Button).label.plain == "Inbox"
-        before = tuple(app.service.reads)
+        assert str(app.query_one("#signals", Button).label) == "Signals"
+        assert str(app.query_one("#inbox", Button).label) == "Inbox"
+        service = app.service
+        assert isinstance(service, DemoReadService)
+        before = tuple(service.reads)
         await pilot.click("#signals")
         await pilot.pause()
         assert app.query_one("#signals-strip").display is True
-        assert tuple(app.service.reads) == before
+        assert tuple(service.reads) == before
 
 
 @pytest.mark.asyncio
@@ -317,7 +487,9 @@ async def test_recovery_feedback_distinguishes_throttle_and_missing_scope(
         app.action_refresh()
         await pilot.pause(0.1)
 
-        assert expected in app.query_one("#status", Static).render().plain
+        status = app.query_one("#status", Static).render()
+        assert isinstance(status, (Text, Content))
+        assert expected in status.plain
         assert app.result.rows == previous_rows
 
 

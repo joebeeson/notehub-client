@@ -152,9 +152,7 @@ class EventFilters:
                 result[key] = value
         if self.select_fields is not None:
             fields = self.select_fields
-            result["selectFields"] = (
-                fields if isinstance(fields, str) else ",".join(fields)
-            )
+            result["selectFields"] = fields if isinstance(fields, str) else ",".join(fields)
         return result
 
     def __iter__(self) -> Iterator[tuple[str, QueryValue]]:
@@ -178,15 +176,20 @@ class EventFilters:
             "select_fields",
             "since",
         ):
-            default = () if name in {
-                "files",
-                "device_uids",
-                "sensor_uids",
-                "fleet_uids",
-                "serial_numbers",
-                "session_uids",
-                "event_uids",
-            } else None
+            default = (
+                ()
+                if name
+                in {
+                    "files",
+                    "device_uids",
+                    "sensor_uids",
+                    "fleet_uids",
+                    "serial_numbers",
+                    "session_uids",
+                    "event_uids",
+                }
+                else None
+            )
             yield name, getattr(self, name), default
 
 
@@ -247,9 +250,7 @@ class DeviceFilters:
             "sku",
         )
         return {
-            key: tuple(getattr(self, name))
-            for name, key in zip(names, keys)
-            if getattr(self, name)
+            key: tuple(getattr(self, name)) for name, key in zip(names, keys) if getattr(self, name)
         }
 
     def __iter__(self) -> Iterator[tuple[str, QueryValue]]:

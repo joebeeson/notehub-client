@@ -1,8 +1,10 @@
 import importlib
+import operator
 import subprocess
 import sys
 from collections.abc import Callable
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock, patch
 
 import pytest
@@ -10,13 +12,20 @@ import pytest
 import notehub_client.runtimes as runtimes
 from notehub_client.__main__ import cli_main, main, mcp_main, tui_main, web_main
 from notehub_client.errors import NotehubDependencyError
-from notehub_client.runtimes import run_runtime, runtime_names
+from notehub_client.runtimes import RUNTIMES, run_runtime, runtime_names
 from notehub_client.runtimes.cli import main as cli_runtime_main
 from notehub_client.runtimes.tui import main as tui_runtime_main
 
 
 def test_runtime_names_list_available_entry_points() -> None:
     assert runtime_names() == ("cli", "tui", "api", "web", "mcp")
+
+
+def test_runtime_metadata_is_read_only() -> None:
+    assert tuple(RUNTIMES) == runtime_names()
+    with pytest.raises(TypeError):
+        operator.setitem(cast("dict[str, str]", RUNTIMES), "cli", "other.module")
+    assert RUNTIMES["cli"] == "notehub_client.runtimes.cli"
 
 
 def test_run_runtime_loads_a_runtime_and_passes_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -82,15 +91,18 @@ def test_core_imports_without_textual_or_rich() -> None:
 import importlib.abc
 import sys
 
-class MissingUiLibraries(importlib.abc.MetaPathFinder):
+class MissingRuntimeLibraries(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split('.')[0] in {'rich', 'textual'}:
+        if fullname.split('.')[0] in {'rich', 'textual', 'click', 'fastapi', 'uvicorn', 'fastmcp'}:
             raise ModuleNotFoundError(f'No module named {fullname!r}', name=fullname.split('.')[0])
 
-sys.meta_path.insert(0, MissingUiLibraries())
+sys.meta_path.insert(0, MissingRuntimeLibraries())
 import notehub_client
 from notehub_client import NotehubClient
+from notehub_client.runtimes import RUNTIMES, runtime_names
 assert NotehubClient
+assert tuple(RUNTIMES) == runtime_names()
+assert len(RUNTIMES) == 5
 try:
     import notehub_client.runtimes.tui
 except notehub_client.errors.NotehubDependencyError as error:

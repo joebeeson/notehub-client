@@ -116,7 +116,9 @@ def adapt_page(
     keys: list[str] = []
     occurrences: dict[str, int] = {}
     for index, row in enumerate(rows):
-        identity = row.get("event") or row.get("uid")
+        identity = (
+            row.get("session") if operation == "sessions" else row.get("event") or row.get("uid")
+        )
         if not isinstance(identity, str) or not identity:
             identity = f"anonymous:{cursor}:{page_num}:{index}"
         count = occurrences.get(identity, 0)
@@ -213,7 +215,7 @@ class TUIReadService:
             return await client.devices.latest(project, uid, filters=query)
         if operation == "sessions":
             return await client.devices.list_sessions(
-                project, uid, filters=query, **numbered.to_query_params()
+                project, uid, filters=query, pagination=numbered
             )
         if operation == "environment":
             return await client.devices.get_environment(project, uid, filters=query)
@@ -262,7 +264,7 @@ class SimulationProjectService:
         simulation: Simulation,
         scenario_name: str,
         client_context: AsyncContextManager[NotehubClient],
-        reader: TUIReadService,
+        reader: ReadService,
     ) -> None:
         self.simulation = simulation
         self.scenario_name = scenario_name

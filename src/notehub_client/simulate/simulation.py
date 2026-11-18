@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -84,7 +85,7 @@ class Simulation:
         self._events: list[dict[str, Any]] = []
         self._faults: list[Fault] = []
         # Cursor state belongs to the run, not an individual transport/client.
-        self._cursors: dict[str, tuple[tuple[Any, ...], int]] = {}
+        self._cursors: OrderedDict[str, tuple[tuple[Any, ...], int]] = OrderedDict()
         for event in scenario.events:
             self._events.append(self._event(event, event.received or self.now))
         for name, destination in (
@@ -313,16 +314,25 @@ class SimulatedDevice:
 
     def queue(self, notefile: str, body: object) -> None:
         """Queue one outbound .qo Note, using normal body composition adapters."""
-        state = self.simulation._state(self.project_uid, self.uid)
-        if not notefile.endswith(".qo"):
-            raise ValueError("outbound Notefile must end in .qo")
+        state = self._outbound_state(notefile)
         note = QueuedNote(self.project_uid, self.uid, notefile, resolve_note_body(body))
         state.outbound.append(self.simulation._note(note))
 
     def queue_many(self, notefile: str, bodies: Iterable[object]) -> None:
-        """Consume bodies lazily from an iterable; successful earlier Notes remain queued."""
+        """Validate the destination, then consume bodies lazily.
+
+        If a later body or the iterable fails, earlier accepted Notes remain
+        queued. Each append still requires an open simulation.
+        """
+        self._outbound_state(notefile)
         for body in bodies:
             self.queue(notefile, body)
+
+    def _outbound_state(self, notefile: str) -> _DeviceState:
+        state = self.simulation._state(self.project_uid, self.uid)
+        if not notefile.endswith(".qo"):
+            raise ValueError("outbound Notefile must end in .qo")
+        return state
 
     @property
     def readings(self) -> Mapping[str, Any]:
@@ -394,7 +404,7 @@ class SimulatedDevice:
         state.sessions.append(
             {
                 "session": session,
-                "when": int(run.now.timestamp()),
+                "session_began": int(run.now.timestamp()),
                 "device": self.uid,
                 "transport": "simulation",
             }

@@ -26,14 +26,23 @@ class CatalogError(NotehubError):
         super().__init__(f"Catalog {stage}: {message}")
 
 
-def pointer_value(value: object, pointer: str) -> object:
-    """Resolve an RFC 6901 JSON Pointer, raising LookupError for missing paths."""
+def _pointer_parts(pointer: str) -> tuple[str, ...]:
+    if not isinstance(pointer, str):
+        raise TypeError("JSON Pointer must be a string")
     if pointer and not pointer.startswith("/"):
         raise ValueError("JSON Pointer must be empty or start with /")
-    for part in pointer.split("/")[1:]:
-        if re.search(r"~(?![01])", part):
-            raise ValueError("invalid JSON Pointer escape")
-        key = part.replace("~1", "/").replace("~0", "~")
+    if re.search(r"~(?![01])", pointer):
+        raise ValueError("invalid JSON Pointer escape")
+    return tuple(part.replace("~1", "/").replace("~0", "~") for part in pointer.split("/")[1:])
+
+
+def pointer_value(value: object, pointer: str) -> object:
+    """Resolve a JSON Pointer, raising LookupError for missing paths.
+
+    The entire pointer is validated before traversal, so malformed syntax raises
+    ValueError even when an earlier path segment is missing.
+    """
+    for key in _pointer_parts(pointer):
         if isinstance(value, Mapping):
             value = value[key]
         elif isinstance(value, (list, tuple)) and re.fullmatch(r"0|[1-9][0-9]*", key):
@@ -61,10 +70,7 @@ class EventSelector:
             raise ValueError("choose file or file_glob")
         if self.discriminator is not None:
             # Validate syntax even when an event does not contain the path.
-            if self.discriminator and not self.discriminator.startswith("/"):
-                raise ValueError("JSON Pointer must be empty or start with /")
-            if re.search(r"~(?![01])", self.discriminator):
-                raise ValueError("invalid JSON Pointer escape")
+            _pointer_parts(self.discriminator)
         if not (self.value is None or type(self.value) in (str, int, float, bool)):
             raise TypeError("discriminator value must be a JSON scalar")
         json.dumps(self.value, allow_nan=False)

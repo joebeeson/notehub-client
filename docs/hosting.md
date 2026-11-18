@@ -39,13 +39,12 @@ and calls it once per run. The host puts scope metadata on emitted
 `ComponentEmission` records but does not filter inputs or automatically add
 device identity to payloads.
 
-`context.events` is the single iterator acquired from the provided source. It is
-pull based and preserves source ordering and event identity. The run owns and
-closes that iterator on completion, failure, or cancellation; it does not close
-the client or services behind the source. Each run needs a distinct iterator.
-Sharing one iterator does not broadcast events. `client.events.iter(...)` is a
-finite paginated history traversal; continuous delivery requires an adapter or
-source supplied by the application.
+`context.events` provides one pull-based iterator per run and preserves source
+ordering and event identity. The host closes the supplied iterator on completion,
+failure, or cancellation. The caller retains ownership of the client and any
+services behind the source. Supply a distinct iterator for each run and consume
+it from the component or a managed child. `client.events.iter(...)` traverses
+paginated history. For continuous delivery, supply your own event source.
 
 Use `context.payloads.decode(event, as_type=YourType)` to apply the client’s
 configured catalog, cattrs bindings, and upgrades. Decoding remains explicit.
@@ -58,8 +57,14 @@ delivered to the supplied sink and are not Notehub event records.
 `asyncio.TaskGroup` behavior and propagates with its original exception. When
 the component returns normally, the host cancels and awaits its remaining managed
 children. Caller cancellation also cancels those children and closes the event
-iterator. Child cleanup may still emit while the run is shutting down; emitting
-or spawning after the run closes raises `RuntimeError`.
+iterator. Managed child cleanup can still emit. Once the host finishes joining
+its children and begins closing the source, reads through a retained iterator
+and calls to `emit()` raise `RuntimeError`.
+
+`spawn()` takes ownership of its coroutine immediately. If shutdown prevents
+scheduling it, the coroutine is closed before the error propagates; do not
+reuse or await that coroutine after rejection. Finalizers should finish their
+cleanup directly rather than spawning replacement tasks during shutdown.
 
 One `run()` call hosts one component. Compose runs with a caller-owned
 `asyncio.TaskGroup` and supply a separate event iterator to each:
@@ -76,6 +81,11 @@ best effort. Component, source, client, and output sink failures propagate to
 the caller. Emission awaits the sink directly, so the sink provides backpressure;
 concurrent child emissions may overlap and the sink should serialize them if
 needed.
+
+For `observe_async_iterable()`, the terminal observation arrives after the
+wrapped iterator's `aclose()` completes. If cleanup raises an ordinary
+exception, the wrapper logs its type and preserves the iteration's outcome.
+Cancellation during cleanup propagates and emits `IterationCancelled`.
 
 ## Local irrigation example
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, TypedDict
 
 if TYPE_CHECKING:
+    from asyncio import Event
+
     from ...client import NotehubClient
     from ...simulate.simulation import Simulation
 
@@ -32,4 +34,5 @@ class RuntimeSession(TypedDict):
     scenario_label: str | None
     seed: int
     generation: int
+    workspace_changed: Event
     lock: Any

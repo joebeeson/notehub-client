@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,10 +11,122 @@ import pytest
 from notehub_client import NotehubClient, compose, filters, simulate
 from notehub_client.errors import NotehubAPIError, NotehubRateLimitError, NotehubTransportError
 from notehub_client.observe import RequestFailed, RequestFinished, RequestStarted
+from notehub_client.simulate import queries
 from notehub_client.simulate.converters import resolve_scenario, scenario_value
 from notehub_client.typing import ScenarioSource
 
 P, D = "app:demo", "dev:temperature"
+
+
+@pytest.mark.asyncio
+async def test_session_cursor_reads_new_syncs_after_a_terminal_page() -> None:
+    scenario = simulate.Scenario().with_project(P).with_device(P, D)
+    with scenario.start() as run:
+        device = run.device(P, D)
+        first, second = device.sync(), device.sync()
+        async with run.client() as client:
+            pages = [
+                page
+                async for page in client.devices.iter_session_pages(
+                    P, D, pagination=filters.cursor(page_size=1)
+                )
+            ]
+            assert [page["sessions"][0]["session"] for page in pages] == [
+                first.session,
+                second.session,
+            ]
+            checkpoint = pages[-1]["next_cursor"]
+            assert (await client.devices.list_sessions(P, D, pagination=filters.page(1, 2)))[
+                "sessions"
+            ][0]["session"] == second.session
+            third = device.sync()
+            resumed = await client.devices.list_sessions(
+                P, D, pagination=filters.cursor(checkpoint, page_size=1)
+            )
+            assert resumed["sessions"][0]["session"] == third.session
+            assert not resumed["has_more"]
+            with pytest.raises(NotehubAPIError) as unrelated:
+                await client.events.list(P, pagination=filters.cursor(checkpoint, page_size=1))
+            assert unrelated.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_cursor_retention_preserves_recent_polling_across_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(queries, "_CURSOR_HISTORY_LIMIT", 2)
+    scenario = (
+        simulate.Scenario()
+        .with_project(P)
+        .with_device(P, D)
+        .with_event(P, D, "data.qo", {"value": 1})
+        .with_event(P, D, "data.qo", {"value": 2})
+    )
+    with scenario.start() as run:
+        async with run.client() as first, run.client() as second:
+            page = await first.events.list(P, pagination=filters.cursor(page_size=1))
+            old = page["next_cursor"]
+            assert page["has_more"]
+            page = await second.events.list(P, pagination=filters.cursor(old, page_size=1))
+            assert [event["body"] for event in page["events"]] == [{"value": 2}]
+            assert not page["has_more"]
+            recent = page["next_cursor"]
+            empty = await first.events.list(P, pagination=filters.cursor(recent, page_size=1))
+            assert empty["events"] == []
+
+            with pytest.raises(NotehubAPIError) as evicted:
+                await second.events.list(P, pagination=filters.cursor(old, page_size=1))
+            assert evicted.value.status_code == 400
+            device = run.device(P, D)
+            device.queue("data.qo", {"value": 3})
+            device.sync()
+            resumed = await second.events.list(
+                P, pagination=filters.cursor(empty["next_cursor"], page_size=1)
+            )
+            assert [event["body"] for event in resumed["events"]] == [{"value": 3}]
+
+    with scenario.start() as restarted:
+        async with restarted.client() as client:
+            with pytest.raises(NotehubAPIError) as unknown:
+                await client.events.list(
+                    P, pagination=filters.cursor(resumed["next_cursor"], page_size=1)
+                )
+            assert unknown.value.status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("fleet_ids", "expected"),
+    [
+        pytest.param((), {"dev:a", "dev:both"}, id="endpoint-only"),
+        pytest.param(("fleet:a",), {"dev:a", "dev:both"}, id="same-fleet"),
+        pytest.param(("fleet:b",), {"dev:both"}, id="intersecting-fleet"),
+        pytest.param(("fleet:a", "fleet:b"), {"dev:a", "dev:both"}, id="repeated-fleets"),
+        pytest.param(("fleet:missing",), set(), id="no-members"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_fleet_event_filters_cannot_expand_endpoint_scope(
+    fleet_ids: tuple[str, ...], expected: set[str]
+) -> None:
+    scenario = (
+        simulate.Scenario()
+        .with_project(P)
+        .with_fleet(P, "fleet:a")
+        .with_fleet(P, "fleet:b")
+        .with_device(P, "dev:a", fleet_uids=("fleet:a",))
+        .with_device(P, "dev:b", fleet_uids=("fleet:b",))
+        .with_device(P, "dev:both", fleet_uids=("fleet:a", "fleet:b"))
+        .with_device(P, "dev:neither")
+    )
+    for uid in ("dev:a", "dev:b", "dev:both", "dev:neither"):
+        scenario = scenario.with_event(P, uid, "data.qo", {"source": uid})
+    with scenario.start() as run:
+        async with run.client() as client:
+            query = filters.fleets(*fleet_ids)
+            inventory = await client.devices.list_for_fleet(P, "fleet:a", filters=query)
+            assert {device["uid"] for device in inventory["devices"]} == expected
+            events = await client.events.list_for_fleet(P, "fleet:a", filters=query)
+            assert {event["device"] for event in events["events"]} == expected
 
 
 @pytest.mark.asyncio
@@ -47,7 +160,9 @@ async def test_toml_queued_work_and_existing_history(datadir: Path) -> None:
             consumed = device.receive("commands.qi")
             assert consumed is not None and consumed["body"] == {"action": "sample"}
             assert device.receive("commands.qi") is None
-            assert len((await client.devices.list_sessions(P, D))["sessions"]) == 3
+            sessions = (await client.devices.list_sessions(P, D))["sessions"]
+            assert len(sessions) == 3
+            assert sessions[0]["session_began"] == int(run.now.timestamp())
             assert len((await client.devices.latest(P, D))["latest_events"]) == 1
 
 
@@ -221,6 +336,11 @@ async def test_query_filters_pagination_projection_and_cursor_scoping() -> None:
             )
             assert len(selected["events"]) == 5
             assert set(selected["events"][0]) == {"event", "body"}
+            projected = await client.events.collect(
+                P, filters=filters.Query().select_fields("body"), pageSize=2
+            )
+            assert len(projected) == 5
+            assert all(set(record) == {"body"} for record in projected)
             assert len((await client.events.list_for_fleet(P, "fleet:one"))["events"]) == 5
             event_id = page["events"][0]["event"]
             assert len((await client.events.list(P, eventUID=event_id))["events"]) == 1
@@ -348,6 +468,26 @@ def test_composition_values_and_clock() -> None:
         assert compose.resolve_target(run.device(P, D)) == compose.DeviceTarget(P, D)
     with pytest.raises(ValueError, match="timezone"):
         simulate.Scenario(start_time=datetime(2025, 1, 1))
+
+
+def test_queue_many_validates_before_consuming_a_generator() -> None:
+    pulled: list[bool] = []
+
+    def bodies() -> Iterator[dict[str, object]]:
+        pulled.append(True)
+        yield {}
+
+    with simulate.Scenario().with_project(P).with_device(P, D).start() as run:
+        device = run.device(P, D)
+        with pytest.raises(ValueError, match="outbound Notefile"):
+            device.queue_many("bad.db", bodies())
+        with pytest.raises(ValueError, match="outbound Notefile"):
+            device.queue_many("bad.db", ())
+        device.queue_many("valid.qo", ())
+        assert not run.snapshot()["devices"][(P, D)]["outbound"]
+    with pytest.raises(RuntimeError, match="closed"):
+        device.queue_many("valid.qo", bodies())
+    assert not pulled
 
 
 def test_reproducible_ids_snapshots_and_partial_generator_failure() -> None:

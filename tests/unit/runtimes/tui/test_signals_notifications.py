@@ -2,11 +2,12 @@ from unittest.mock import Mock
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import Checkbox, Sparkline, Static
+from textual.widgets import Button, Checkbox, Input, Sparkline, Static
 
 from notehub_client.observe import RequestFinished, RequestStarted
 from notehub_client.runtimes.tui.notifications import (
     NotificationCenter,
+    NotificationEntry,
     NotificationInboxScreen,
     notify_safe,
 )
@@ -90,7 +91,7 @@ async def test_signal_settings_apply_and_cancel_return_session_choices() -> None
         await pilot.pause()
         screen = app.screen
         screen.query_one("#signal-receipt-delay", Checkbox).value = True
-        screen.query_one("#signal-apply").press()
+        screen.query_one("#signal-apply", Button).press()
         await pilot.pause()
         assert result == [(SignalKind.REQUEST_DURATION, SignalKind.RECEIPT_DELAY)]
 
@@ -117,7 +118,10 @@ async def test_inbox_keyboard_selection_returns_safe_target() -> None:
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
-        assert results[0].target_uid == "ev:1"
+        assert len(results) == 1
+        result = results[0]
+        assert isinstance(result, NotificationEntry)
+        assert result.target_uid == "ev:1"
 
 
 @pytest.mark.asyncio
@@ -148,8 +152,8 @@ async def test_export_success_uses_session_inbox_adapter(tmp_path) -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.push_screen(ExportScreen({"event": "evt:1"}, feedback=feedback.append))
         await pilot.pause()
-        app.screen.query_one("#export-path").value = str(target)
-        app.screen.query_one("#export-save").press()
+        app.screen.query_one("#export-path", Input).value = str(target)
+        app.screen.query_one("#export-save", Button).press()
         await pilot.pause()
         assert target.exists()
         assert feedback == ["Export saved."]

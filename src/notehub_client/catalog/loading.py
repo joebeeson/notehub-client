@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import tomllib
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, TextIO
 from urllib.parse import unquote, urldefrag
 
 from ..compose import resolve_json
 from ..errors import NotehubDependencyError
-from .models import Catalog, CatalogError, Contract, EventSelector, pointer_value
+from .models import Catalog, CatalogError, Contract, ContractKey, EventSelector, pointer_value
 from .schema import map_schema
 
 Reader = Callable[[str], str]
@@ -78,6 +79,46 @@ def _schema(document: object, schema: Any) -> Any:
     return result
 
 
+def _manifest_entries(data: dict[str, Any]) -> list[tuple[Contract, str, str]]:
+    version = data.get("catalog_version")
+    if type(version) is not int or version != 1:
+        raise CatalogError("load", "catalog_version must be the integer 1")
+    if data.keys() - {"catalog_version", "contracts"}:
+        raise CatalogError("load", "unknown catalog fields; expected catalog_version and contracts")
+    items = data.get("contracts", [])
+    if not isinstance(items, list):
+        raise CatalogError("load", "contracts must be an array of tables")
+
+    entries = []
+    seen: set[ContractKey] = set()
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            raise CatalogError("load", f"contract #{index} must be a table")
+        if item.keys() - {"id", "version", "message_ref", "binding", "selector"}:
+            raise CatalogError("load", f"contract #{index} has unknown fields")
+        try:
+            reference = item["message_ref"]
+            if not isinstance(reference, str):
+                raise TypeError("message_ref must be a string")
+            filename, fragment = urldefrag(reference)
+            if not filename or not fragment:
+                raise ValueError("message_ref requires a document and fragment")
+            contract = Contract(
+                id=item["id"],
+                version=item["version"],
+                selector=EventSelector(**item.get("selector", {})),
+                message_ref=reference,
+                binding=item.get("binding"),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise CatalogError("load", f"contract #{index} has invalid metadata") from error
+        if contract.key in seen:
+            raise CatalogError("load", f"contract #{index} duplicates an earlier id and version")
+        seen.add(contract.key)
+        entries.append((contract, filename, fragment))
+    return entries
+
+
 def loads(text: str, *, read_document: Reader) -> Catalog:
     """Load a TOML catalog, obtaining named AsyncAPI documents through a reader.
 
@@ -85,15 +126,10 @@ def loads(text: str, *, read_document: Reader) -> Catalog:
     It is invoked only while loading; decoding never performs artifact I/O.
     """
     try:
-        data = tomllib.loads(text)
-        if data.get("catalog_version") != 1:
-            raise ValueError("catalog_version must be 1")
+        manifest = _manifest_entries(tomllib.loads(text))
         documents: dict[str, dict[str, Any]] = {}
         entries = []
-        for item in data.get("contracts", []):
-            filename, fragment = urldefrag(item["message_ref"])
-            if not filename or not fragment:
-                raise ValueError("message_ref requires a document and fragment")
+        for contract, filename, fragment in manifest:
             if filename not in documents:
                 documents[filename] = _document(read_document(filename), filename)
             document = documents[filename]
@@ -105,16 +141,10 @@ def loads(text: str, *, read_document: Reader) -> Catalog:
                 schema = schema["schema"]
             if schema_format not in (JSON_FORMAT, ASYNCAPI_FORMAT):
                 raise ValueError("unsupported payload schema format")
-            selector = EventSelector(**item.get("selector", {}))
             entries.append(
-                Contract(
-                    id=item["id"],
-                    version=item["version"],
-                    selector=selector,
-                    message_ref=item["message_ref"],
-                    binding=item.get("binding"),
-                    schema_format=schema_format,
-                ).with_schema(_schema(document, schema))
+                replace(contract, schema_format=schema_format).with_schema(
+                    _schema(document, schema)
+                )
             )
         return Catalog(entries)
     except (NotehubDependencyError, CatalogError):

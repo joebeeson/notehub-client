@@ -10,7 +10,7 @@ import httpx
 
 from ..compose import resolve_environment, resolve_note_body
 from .models import QueuedNote
-from .queries import device_rows, event_page, page
+from .queries import device_rows, event_page, page, session_page
 from .simulation import Simulation
 
 __all__ = ["SimulationTransport"]
@@ -118,7 +118,7 @@ class SimulationTransport(httpx.AsyncBaseTransport):
                 for d in device_rows(run, project, httpx.QueryParams({"deviceUID": uid}))["devices"]
             )
         if rest == ["sessions"] and method == "GET":
-            return page(state.sessions, query, "sessions")
+            return session_page(run, path, state.sessions, query)
         if rest == ["latest"] and method == "GET":
             if query:
                 raise NotImplementedError("latest query options unsupported")

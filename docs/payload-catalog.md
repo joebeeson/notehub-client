@@ -34,11 +34,20 @@ sharing product/file metadata. A missing path does not match; JSON `true` does
 not match the number `1`. For unversioned historical data, pass an explicit
 contract key to `decode()` to bypass automatic selection.
 
+Pointer syntax is checked before reading event fields: escape `/` as `~1` and
+`~` as `~0`. An empty pointer addresses the whole event; `/` addresses an empty
+object key. Malformed syntax is a configuration error rather than a non-match.
+
 The TOML format uses `catalog_version = 1` and `[[contracts]]` entries with `id`,
 `version`, `message_ref`, optional `binding`, and an optional `[contracts.selector]`.
 Each `message_ref` names a relative AsyncAPI document plus a JSON Pointer fragment.
 Bindings are names resolved through Python configuration; artifacts never import
 Python classes or execute callables.
+
+Version 1 rejects unknown fields in the manifest and contract tables, along with
+duplicate `(id, version)` entries in one file. Manifest metadata is validated
+before companion documents are read. Use separate catalogs and `overlay()` when
+you intend to replace an existing version.
 
 The initial profile supports AsyncAPI 3.1.0 JSON documents and, with the `yaml`
 extra, safe YAML documents. Messages may be addressed through channels or reusable
@@ -62,6 +71,45 @@ Install the `fsspec` extra and the filesystem's own backend when needed. Sources
 can use different protocols. Directories select immediate TOML children; glob
 matches and directory children are sorted within each source. Later sources
 overlay earlier ones. No artifact I/O takes place during decoding.
+
+## Export portable artifacts
+
+`export_artifacts(catalog)` returns an immutable `CatalogArtifacts` bundle with
+TOML text in `manifest` and JSON companion texts in `documents`. It performs no
+file or network I/O. Round-trip entirely in memory with:
+
+```python
+from notehub_client.catalog import export_artifacts, loads
+
+artifacts = export_artifacts(catalog)
+restored = loads(artifacts.manifest, read_document=artifacts.documents.__getitem__)
+```
+
+To write an isolated bundle explicitly:
+
+```python
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from notehub_client.catalog import load
+
+with TemporaryDirectory() as directory:
+    target = Path(directory)
+    for name, text in artifacts.documents.items():
+        (target / name).write_text(text, encoding="utf-8", newline="\n")
+    manifest = target / "catalog.toml"
+    manifest.write_text(artifacts.manifest, encoding="utf-8", newline="\n")
+    restored = load(manifest)
+```
+
+Export preserves contract order, selectors, binding names, schema formats, and
+validation behavior. It generates new message references; the catalog does not
+retain original channels, operations, comments, or document layout. Schema-less
+contracts, unsupported formats, external or dangling references, and schema `$id`
+resource scopes raise an export-stage `CatalogError` with the contract key.
+Loader-produced recursive schemas can be exported. Python converters and upgrades
+remain application-owned. See the [export design](catalog-export-design.md) for
+the artifact layout and reference rules. Filesystem overwrite and transaction
+policies remain the caller's responsibility.
 
 ## Decode and upgrade explicitly
 

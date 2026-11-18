@@ -11,7 +11,7 @@ from itertools import count
 from typing import TYPE_CHECKING, TypeAlias, TypeVar
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterable, AsyncIterator, Iterator
+    from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Iterator
 
     from .typing.observe import Observer
 
@@ -23,7 +23,7 @@ ItemT = TypeVar("ItemT")
 
 @dataclass(frozen=True, slots=True)
 class RequestStarted:
-    """A Notehub HTTP request is about to be sent."""
+    """A Notehub request attempt began, including pacing and authentication."""
 
     request_id: int
     method: str
@@ -181,12 +181,17 @@ async def observe_async_iterable(
     observer: Observer | None,
     description: str,
     total: int | None = None,
-) -> AsyncIterator[ItemT]:
+) -> AsyncGenerator[ItemT, None]:
     """Yield an async iterable while emitting framework-neutral lifecycle events.
 
     The ``description`` is also made available to Notehub requests performed
     while fetching the next item, allowing observers to relate requests to an
     iteration without exposing query parameters, headers, or payloads.
+
+    Use ``contextlib.aclosing`` when the consumer may stop early. Closing this
+    generator calls the source iterator's ``aclose`` method when available.
+    Terminal events follow source cleanup. Cleanup exceptions are logged by
+    type, while cancellation during cleanup propagates as cancellation.
     """
     if not description:
         raise ValueError("description must be nonempty")
@@ -195,20 +200,24 @@ async def observe_async_iterable(
 
     iteration_id = next(_ITERATION_IDS)
     item_count = 0
-    iterator = iterable.__aiter__()
+    iterator: AsyncIterator[ItemT] | None = None
     notify(observer, IterationStarted(iteration_id, description, total))
     try:
-        while True:
-            operation_token = _ACTIVE_OPERATION.set(description)
-            try:
-                item = await iterator.__anext__()
-            except StopAsyncIteration:
-                break
-            finally:
-                _ACTIVE_OPERATION.reset(operation_token)
-            item_count += 1
-            notify(observer, IterationAdvanced(iteration_id, description, item_count, total))
-            yield item
+        try:
+            iterator = aiter(iterable)
+            while True:
+                operation_token = _ACTIVE_OPERATION.set(description)
+                try:
+                    item = await iterator.__anext__()
+                except StopAsyncIteration:
+                    break
+                finally:
+                    _ACTIVE_OPERATION.reset(operation_token)
+                item_count += 1
+                notify(observer, IterationAdvanced(iteration_id, description, item_count, total))
+                yield item
+        finally:
+            await _close_observed_iterator(iterator)
     except (asyncio.CancelledError, GeneratorExit):
         notify(observer, IterationCancelled(iteration_id, description, item_count))
         raise
@@ -220,16 +229,18 @@ async def observe_async_iterable(
         raise
     else:
         notify(observer, IterationFinished(iteration_id, description, item_count, total))
-    finally:
+
+
+async def _close_observed_iterator(iterator: AsyncIterator[ItemT] | None) -> None:
+    try:
         close = getattr(iterator, "aclose", None)
         if close is not None:
-            try:
-                await close()
-            except Exception as error:
-                LOGGER.warning(
-                    "Observed async iterable cleanup failed: error_type=%r",
-                    type(error).__name__,
-                )
+            await close()
+    except Exception as error:
+        LOGGER.warning(
+            "Observed async iterable cleanup failed: error_type=%r",
+            type(error).__name__,
+        )
 
 
 def active_operation() -> str | None:

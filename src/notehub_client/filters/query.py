@@ -41,6 +41,9 @@ __all__ = [
 class Query(Mapping[str, QueryValue]):
     """Immutable wire query parameters with composable fluent conveniences.
 
+    Selector methods append to existing strings or repeated string values.
+    Appending to another scalar type raises ``ValueError``.
+
     >>> dict(Query().devices("dev:one").files("sensors.qo"))
     {'deviceUID': ('dev:one',), 'files': 'sensors.qo'}
     """
@@ -129,12 +132,8 @@ class Query(Mapping[str, QueryValue]):
         return self._append("deviceUID", *uids)
 
     def files(self, *names: str) -> Self:
-        """Add file names to Notehub's comma-separated ``files`` parameter."""
-        if any(not isinstance(name, str) or not name for name in names):
-            raise ValueError("file names must be nonempty strings")
-        current = self.get("files")
-        existing = tuple(current.split(",")) if isinstance(current, str) else ()
-        return self._set(files=",".join((*existing, *names)))
+        """Append file names and encode the combined selector as a comma-separated value."""
+        return self._append("files", *names, separator=",", label="file names")
 
     def sensors(self, *uids: str) -> Self:
         """Add sensor UIDs as repeated ``sensorUID`` values."""
@@ -192,20 +191,22 @@ class Query(Mapping[str, QueryValue]):
             raise ValueError("since must be nonempty")
         return self._set(since=value)
 
-    def _append(self, key: str, *values: str) -> Self:
+    def _append(
+        self, key: str, *values: str, separator: str | None = None, label: str = "selector values"
+    ) -> Self:
         if not values:
             return self
         if any(not isinstance(value, str) or not value for value in values):
-            raise ValueError("selector values must be nonempty strings")
+            raise ValueError(f"{label} must be nonempty strings")
         current = self.get(key, ())
-        prior = (
-            current
-            if isinstance(current, tuple)
-            else (current,)
-            if isinstance(current, str)
-            else ()
-        )
-        return self._set(**{key: (*prior, *values)})
+        if isinstance(current, tuple):
+            prior = current
+        elif isinstance(current, str):
+            prior = (current,) if current or separator is None else ()
+        else:
+            raise ValueError(f"query parameter {key!r} must contain strings to append values")
+        combined = (*prior, *values)
+        return self._set(**{key: combined if separator is None else separator.join(combined)})
 
 
 def merge_query_params(
@@ -260,8 +261,6 @@ def events(*uids: str) -> Query:
     return Query().events(*uids)
 
 
-def date_range(
-    start: int | datetime | None = None, end: int | datetime | None = None
-) -> Query:
+def date_range(start: int | datetime | None = None, end: int | datetime | None = None) -> Query:
     """Create an event query with Unix-second or timezone-aware datetime bounds."""
     return Query().date_range(start, end)

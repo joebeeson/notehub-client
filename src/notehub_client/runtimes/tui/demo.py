@@ -189,7 +189,13 @@ class DemoReadService:
                 "has_more": start + PAGE_SIZE < len(records),
             }
         elif operation == "environment":
-            payload = {"environment_variables": {"PUMP_TOKEN": "never displayed", "INTERVAL": "60"}}
+            # Synthetic sensitive-field data exercises masking; it cannot authenticate.
+            payload = {
+                "environment_variables": {
+                    "PUMP_TOKEN": "never displayed",  # nosec B105
+                    "INTERVAL": "60",
+                }
+            }
         elif operation in COLLECTION_KEYS:
             payload = {COLLECTION_KEYS[operation]: records}
         elif operation in {"routes", "monitors"}:
@@ -229,7 +235,14 @@ class DemoReadService:
         if operation == "latest":
             return [row for row in self._events if row.get("device") == uid][:4]
         if operation == "sessions":
-            return [{"uid": "session:demo-1", "device": uid, "when": 1794916800, "duration": 12}]
+            return [
+                {
+                    "session": "session:demo-1",
+                    "device": uid,
+                    "session_began": 1794916800,
+                    "period": {"duration": 12},
+                }
+            ]
         if operation == "fleets":
             return [{"uid": DEMO_FLEET_UID, "label": "Orchard sensors"}]
         if operation == "routes":

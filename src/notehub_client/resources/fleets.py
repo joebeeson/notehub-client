@@ -34,4 +34,4 @@ class FleetsFacade:
             encode_path_segments("projects", project_uid, "fleets"),
             params=merge_query_params(filters, params),
         )
-        return cast("FleetsResponse", require_collection(payload, "fleets", paginated=False))
+        return cast("FleetsResponse", require_collection(payload, "fleets", require_uid=True))

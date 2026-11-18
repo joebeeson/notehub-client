@@ -18,6 +18,21 @@ with runtime_imports("web", "uvicorn"):
     import uvicorn
 
 
+class _DashboardServer(uvicorn.Server):
+    def __init__(self, config: uvicorn.Config, *, url: str, launch_browser: bool) -> None:
+        super().__init__(config)
+        self._url = url
+        self._launch_browser = launch_browser
+
+    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        await super().startup(sockets=sockets)
+        if not self.started or self.should_exit:
+            return
+        print(f"Dashboard: {self._url}", flush=True)
+        if self._launch_browser:
+            threading.Thread(target=webbrowser.open, args=(self._url,), daemon=True).start()
+
+
 def main(args: Sequence[str] | None = None) -> None:
     """Start the loopback dashboard and print a one-time bootstrap URL."""
     parser = argparse.ArgumentParser(prog="notehub-client web")
@@ -41,17 +56,22 @@ def main(args: Sequence[str] | None = None) -> None:
     from ..api import create_app
 
     app = create_app(dashboard=True, token_file=options.token_file)
-    port = options.port
-    if port == 0:
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
-    fragment = urlencode({"secret": app.state.bootstrap_secret, "project": options.project or ""})
-    url = f"http://127.0.0.1:{port}/dashboard#{fragment}"
-    print(f"Dashboard: {url}", flush=True)
-    if options.launch_browser:
-        threading.Timer(0.5, webbrowser.open, args=(url,)).start()
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    # Keep the selected port reserved until Uvicorn takes over the same socket.
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", options.port))
+        port = listener.getsockname()[1]
+        fragment = urlencode(
+            {"secret": app.state.bootstrap_secret, "project": options.project or ""}
+        )
+        url = f"http://127.0.0.1:{port}/dashboard#{fragment}"
+        server = _DashboardServer(
+            uvicorn.Config(app, host="127.0.0.1", port=port, lifespan="on"),
+            url=url,
+            launch_browser=options.launch_browser,
+        )
+        server.run(sockets=[listener])
+        if not server.started:
+            raise SystemExit("notehub-client web: dashboard startup failed")
 
 
 __all__ = ["main"]

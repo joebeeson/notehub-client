@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from textual.app import App
 from textual.containers import VerticalScroll
-from textual.widgets import Input, Select
+from textual.widgets import Input, Select, TextArea
 
 from notehub_client.filters import Query
 from notehub_client.runtimes.tui import main
@@ -72,7 +72,10 @@ def test_filter_builder_preserves_structured_and_extra_values() -> None:
     assert query["deviceUID"] == ("dev:one", "dev:two")
     assert query["files"] == "a.qo,b.qo"
     assert query["selectFields"] == "event,body"
-    assert query["endDate"] - query["startDate"] == 86400
+    start_seconds, end_seconds = query["startDate"], query["endDate"]
+    assert isinstance(start_seconds, int) and not isinstance(start_seconds, bool)
+    assert isinstance(end_seconds, int) and not isinstance(end_seconds, bool)
+    assert end_seconds - start_seconds == 86400
 
 
 @pytest.mark.parametrize(
@@ -135,7 +138,9 @@ async def test_filter_removal_updates_advanced_json_draft() -> None:
 
         await pilot.click("#filter-remove-0")
         await pilot.pause()
-        assert json.loads(screen.query_one("#filter-advanced").text) == {"since": "cursor"}
+        assert json.loads(screen.query_one("#filter-advanced", TextArea).text) == {
+            "since": "cursor"
+        }
         screen.query_one(VerticalScroll).scroll_end(animate=False)
         await pilot.pause()
         await pilot.click("#filter-apply")

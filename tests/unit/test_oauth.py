@@ -10,6 +10,37 @@ from notehub_client.errors import NotehubDependencyError, NotehubOAuthError
 from notehub_client.oauth import TOKEN_URL, NotehubOAuthTokenProvider
 
 
+@pytest.mark.parametrize(
+    "access_token",
+    [
+        pytest.param(None, id="missing"),
+        pytest.param("", id="empty"),
+        pytest.param("invalid\\token", id="invalid-bearer"),
+    ],
+)
+@pytest.mark.asyncio
+@respx.mock
+async def test_oauth_recovers_after_rejecting_a_cached_token(access_token: str | None) -> None:
+    invalid: dict[str, object] = {"token_type": "Bearer", "expires_in": 1800}
+    if access_token is not None:
+        invalid["access_token"] = access_token
+    route = respx.post(TOKEN_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=invalid),
+            httpx.Response(
+                200,
+                json={"access_token": "valid-token", "token_type": "Bearer", "expires_in": 1800},
+            ),
+        ]
+    )
+    async with NotehubOAuthTokenProvider("client-id", "client-secret") as provider:
+        with pytest.raises(NotehubOAuthError):
+            await provider()
+        tokens = await asyncio.gather(*(provider() for _ in range(8)))
+        assert tokens == ["valid-token"] * 8
+    assert route.call_count == 2
+
+
 def test_oauth_reports_missing_optional_dependency_at_feature_boundary() -> None:
     with patch.dict("sys.modules", {"authlib.integrations.httpx_client": None}):
         with pytest.raises(NotehubDependencyError) as captured:

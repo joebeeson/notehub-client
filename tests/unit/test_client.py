@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock
 
 import httpx
@@ -13,7 +14,9 @@ from notehub_client.errors import (
     NotehubResponseError,
     NotehubTransportError,
 )
-from notehub_client.filters import CursorPagination
+from notehub_client.filters import CursorPagination, Query
+from notehub_client.helpers import RequestPacer
+from notehub_client.observe import ClientEvent, RequestCancelled, RequestStarted
 from notehub_client.typing.query import QueryValue
 
 
@@ -208,13 +211,86 @@ async def test_closed_client_rejects_context_reentry_and_requests() -> None:
         await client.request("GET", "projects")
 
 
+@pytest.mark.parametrize("waiting_for", ["token", "pacing"])
+@pytest.mark.asyncio
+async def test_close_blocks_waiting_requests_on_a_borrowed_transport(waiting_for: str) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    sent: list[str] = []
+
+    async def wait() -> str:
+        entered.set()
+        await release.wait()
+        return "test-pat"
+
+    class PausedPacer(RequestPacer):
+        async def acquire(self) -> None:
+            await wait()
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request.method)
+        return httpx.Response(200, json={})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as transport:
+        if waiting_for == "token":
+            client = NotehubClient(token_provider=wait, http_client=transport)
+        else:
+            client = NotehubClient("test-pat", pacer=PausedPacer(), http_client=transport)
+        pending = asyncio.create_task(client.request("GET", "projects"))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            await client.aclose()
+        finally:
+            release.set()
+        with pytest.raises(RuntimeError, match="NotehubClient is closed"):
+            await pending
+        assert sent == []
+        assert not transport.is_closed
+
+
 @pytest.mark.asyncio
 async def test_request_rejects_conflicting_body_and_authentication_options() -> None:
-    async with NotehubClient("pat") as client:
+    provider = AsyncMock(return_value="test-pat")
+    async with NotehubClient(token_provider=provider) as client:
         with pytest.raises(ValueError, match="mutually exclusive"):
             await client.request("POST", "projects", json={}, data=b"body")
         with pytest.raises(ValueError, match="controlled by token"):
             await client.request("GET", "projects", headers={"Authorization": "Bearer other"})
+    provider.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_token_resolution_reports_terminal_request_event() -> None:
+    entered = asyncio.Event()
+    events: list[ClientEvent] = []
+
+    class Observer:
+        def on_event(self, event: ClientEvent) -> None:
+            events.append(event)
+
+    async def token() -> str:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("token wait must be cancelled")
+
+    def respond(_: httpx.Request) -> httpx.Response:
+        pytest.fail("a request without a resolved token must never be sent")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as transport:
+        async with NotehubClient(
+            token_provider=token, http_client=transport, observer=Observer()
+        ) as client:
+            pending = asyncio.create_task(client.request("GET", "projects"))
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=2)
+            finally:
+                pending.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await pending
+    started, cancelled = events
+    assert isinstance(started, RequestStarted)
+    assert isinstance(cancelled, RequestCancelled)
+    assert started.request_id == cancelled.request_id
 
 
 @pytest.mark.asyncio
@@ -280,9 +356,10 @@ async def test_transport_errors_are_wrapped_without_transport_details() -> None:
     assert "sensitive hostname" not in str(exc.value)
 
 
+@pytest.mark.parametrize("source", ["pagination", "filter", "keywords"])
 @pytest.mark.asyncio
 @respx.mock
-async def test_event_cursor_can_be_resumed_and_moves_forward_page_by_page() -> None:
+async def test_event_cursor_can_be_resumed_and_moves_forward_page_by_page(source: str) -> None:
     route = respx.get("https://api.notefile.net/v1/projects/app:test/events").mock(
         side_effect=[
             httpx.Response(
@@ -304,17 +381,37 @@ async def test_event_cursor_can_be_resumed_and_moves_forward_page_by_page() -> N
         ]
     )
     async with NotehubClient("pat") as client:
-        events = [
-            event
-            async for event in client.events.iter(
-                "app:test", pagination=CursorPagination(cursor="0")
+        if source == "pagination":
+            events = await client.events.collect(
+                "app:test", pagination=CursorPagination(cursor="saved", page_size=7)
             )
-        ]
+        elif source == "filter":
+            events = await client.events.collect(
+                "app:test", filters=Query.from_value({"cursor": "saved", "pageSize": 7})
+            )
+        else:
+            events = await client.events.collect("app:test", cursor="saved", pageSize=7)
 
     assert [event["event"] for event in events] == ["first", "second"]
     assert [event["when"] for event in events] == [1, 2]
-    assert route.calls[0].request.url.params["cursor"] == "0"
-    assert route.calls[1].request.url.params["cursor"] == "cursor-1"
+    assert [call.request.url.params["cursor"] for call in route.calls] == ["saved", "cursor-1"]
+    assert [call.request.url.params["pageSize"] for call in route.calls] == ["7", "7"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_event_page_iterator_exposes_empty_and_terminal_checkpoints() -> None:
+    responses = [
+        {"events": [], "has_more": True, "next_cursor": "empty-page"},
+        {"events": [{"event": "last"}], "has_more": False, "next_cursor": "terminal-page"},
+    ]
+    route = respx.get("https://api.notefile.net/v1/projects/app:test/events").mock(
+        side_effect=[httpx.Response(200, json=response) for response in responses]
+    )
+    async with NotehubClient("pat") as client:
+        pages = [page async for page in client.events.iter_pages("app:test", pageSize=5)]
+    assert pages == responses
+    assert [call.request.url.params["cursor"] for call in route.calls] == ["0", "empty-page"]
 
 
 @pytest.mark.asyncio
@@ -333,13 +430,10 @@ async def test_event_cursor_must_advance_when_more_events_remain() -> None:
         ]
     )
     async with NotehubClient("pat") as client:
+        events = client.events.iter("app:test", pagination=CursorPagination(cursor="0"))
+        assert (await anext(events))["event"] == "first"
         with pytest.raises(NotehubResponseError, match="missing or repeated"):
-            _ = [
-                event
-                async for event in client.events.iter(
-                    "app:test", pagination=CursorPagination(cursor="0")
-                )
-            ]
+            await anext(events)
     assert route.call_count == 2
 
 
@@ -356,3 +450,5 @@ async def test_event_cursor_cannot_be_combined_with_page_or_sort_parameters() ->
             await client.events.list(
                 "app:test", pagination=CursorPagination(cursor="0"), filters=CursorFilter()
             )
+        with pytest.raises(ValueError, match="specified twice"):
+            await client.events.collect("app:test", pagination=CursorPagination(), pageSize=7)

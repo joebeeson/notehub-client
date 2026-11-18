@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from textual.command import CommandPalette
 from textual.pilot import Pilot
-from textual.widgets import Button, DataTable, Input, Select
+from textual.widgets import Button, ContentSwitcher, DataTable, Input, Select
 
 from notehub_client.runtimes.tui.app import NotehubApp
 from notehub_client.runtimes.tui.demo import DEMO_PROJECT_UID
@@ -84,7 +84,9 @@ async def test_layout_focus_and_visible_controls_fit_each_acceptance_size(
         assert app.view is ViewId.EVENTS
         assert app.query_one("#records", DataTable).row_count == 50
         assert app.query_one("#inspector").display is inspector_visible
-        assert app.query_one("#view-host").visible_content.id == "records-view"
+        visible = app.query_one("#view-host", ContentSwitcher).visible_content
+        assert visible is not None
+        assert visible.id == "records-view"
         assert [child.id for child in app.query_one("#view-host").children if child.display] == [
             "records-view"
         ]
@@ -117,14 +119,14 @@ async def test_layout_focus_and_visible_controls_fit_each_acceptance_size(
 
         toast_button = app.query_one("#toasts", Button)
         assert toast_button.display
-        assert toast_button.label.plain == "Toasts: On"
+        assert str(toast_button.label) == "Toasts: On"
         assert toast_button.region.right <= size[0]
         assert toast_button.region.bottom <= size[1]
         await _tab_to(pilot, app, "toasts")
         await pilot.press("enter")
         await pilot.pause(0.1)
         assert app.toasts_enabled is False
-        assert toast_button.label.plain == "Toasts: Off"
+        assert str(toast_button.label) == "Toasts: Off"
 
         await pilot.press("/")
         assert getattr(app.focused, "id", None) == "search"
@@ -184,16 +186,22 @@ async def test_search_shortcuts_and_resize_preserve_keyboard_focus_and_selection
 
         await pilot.press("down")
         await pilot.pause(0.05)
-        selected_event = app.selected_record["event"]
+        selected = app.selected_record
+        assert selected is not None
+        selected_event = selected["event"]
 
         await pilot.resize_terminal(140, 42)
         await pilot.pause(0.1)
         assert app.query_one("#inspector").display is True
         assert app.focused is table
-        assert app.selected_record["event"] == selected_event
+        selected = app.selected_record
+        assert selected is not None
+        assert selected["event"] == selected_event
 
         await pilot.resize_terminal(80, 24)
         await pilot.pause(0.1)
         assert app.query_one("#inspector").display is False
         assert app.focused is table
-        assert app.selected_record["event"] == selected_event
+        selected = app.selected_record
+        assert selected is not None
+        assert selected["event"] == selected_event

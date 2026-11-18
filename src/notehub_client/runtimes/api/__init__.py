@@ -24,7 +24,7 @@ from ...simulate import available as available_scenarios
 from ...simulate import named as named_scenario
 from ..helpers import create_client, runtime_imports
 from .commands import execute_read
-from .depends import NotehubClientDep
+from .depends import NotehubClientDep, active_session_client, get_runtime_session
 from .typing import RuntimeSession
 
 if TYPE_CHECKING:
@@ -35,7 +35,13 @@ if TYPE_CHECKING:
 
 with runtime_imports("api", "fastapi"):
     from fastapi import FastAPI, Request
-    from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+    from fastapi.responses import (
+        FileResponse,
+        JSONResponse,
+        RedirectResponse,
+        Response,
+        StreamingResponse,
+    )
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel, Field, SecretStr
 
@@ -51,6 +57,35 @@ class TokenRequest(BaseModel):
     """A Personal Access Token entered through the local dashboard."""
 
     token: SecretStr
+
+
+def _advance_workspace(session: RuntimeSession) -> None:
+    session["workspace_changed"].set()
+    session["workspace_changed"] = asyncio.Event()
+    session["generation"] += 1
+
+
+async def _clear_simulation(session: RuntimeSession) -> None:
+    run, client, http = (
+        session["simulation"],
+        session["simulation_client"],
+        session["simulation_http"],
+    )
+    session.update(
+        mode="live",
+        simulation=None,
+        simulation_client=None,
+        simulation_http=None,
+        scenario_name=None,
+        scenario_label=None,
+    )
+    _advance_workspace(session)
+    if run is not None:
+        run.close()
+    if client is not None:
+        await client.aclose()
+    if http is not None:
+        await http.aclose()
 
 
 def _json_value(value: Any) -> Any:
@@ -205,6 +240,7 @@ def create_app(
             raise PermissionError("invalid bootstrap")
         previous = context["sessions"].pop(request.cookies.get("notehub_session", ""), None)
         if previous is not None:
+            previous["workspace_changed"].set()
             if previous["simulation"] is not None:
                 previous["simulation"].close()
             if previous["simulation_client"] is not None:
@@ -216,11 +252,21 @@ def create_app(
         session_id = secrets.token_urlsafe(32)
         client = make_client(context["launch_token"]) if app.state.notehub_client else None
         context["sessions"][session_id] = RuntimeSession(
-            mode="live", client=client, simulation_client=None, simulation=None,
-            simulation_http=None, scenario_name=None, scenario_label=None, seed=0, generation=0,
+            mode="live",
+            client=client,
+            simulation_client=None,
+            simulation=None,
+            simulation_http=None,
+            scenario_name=None,
+            scenario_label=None,
+            seed=0,
+            generation=0,
+            workspace_changed=asyncio.Event(),
             lock=asyncio.Lock(),
         )
-        response = JSONResponse({"authenticated": context["sessions"][session_id]["client"] is not None})
+        response = JSONResponse(
+            {"authenticated": context["sessions"][session_id]["client"] is not None}
+        )
         response.set_cookie(
             "notehub_session", session_id, httponly=True, samesite="strict", path="/api"
         )
@@ -231,10 +277,12 @@ def create_app(
         """Return credential state without revealing the token."""
         session_id = request.cookies.get("notehub_session", "")
         value = context["sessions"].get(session_id)
-        return {"initialized": value is not None,
-                "authenticated": bool(value and value["client"] and value["mode"] == "live"),
-                "has_live_session": bool(value and value["client"]),
-                "mode": value["mode"] if value else None}
+        return {
+            "initialized": value is not None,
+            "authenticated": bool(value and value["client"] and value["mode"] == "live"),
+            "has_live_session": bool(value and value["client"]),
+            "mode": value["mode"] if value else None,
+        }
 
     @app.post("/api/session/token")
     async def set_token(request: Request, body: TokenRequest) -> dict[str, bool]:
@@ -245,19 +293,7 @@ def create_app(
         session = context["sessions"][session_id]
         old = session["client"]
         session["client"] = replacement
-        session["mode"] = "live"
-        if session["simulation"] is not None:
-            session["simulation"].close()
-        if session["simulation_http"] is not None:
-            await session["simulation_http"].aclose()
-        if session["simulation_client"] is not None:
-            await session["simulation_client"].aclose()
-        session["simulation_http"] = None
-        session["simulation_client"] = None
-        session["simulation"] = None
-        session["scenario_name"] = None
-        session["scenario_label"] = None
-        session["generation"] += 1
+        await _clear_simulation(session)
         if old is not None:
             await old.aclose()
         return {"authenticated": True}
@@ -269,19 +305,7 @@ def create_app(
         if session is not None:
             old = session["client"]
             session["client"] = None
-            if session["simulation"] is not None:
-                session["simulation"].close()
-            if session["simulation_http"] is not None:
-                await session["simulation_http"].aclose()
-            if session["simulation_client"] is not None:
-                await session["simulation_client"].aclose()
-            session["simulation_http"] = None
-            session["simulation_client"] = None
-            session["simulation"] = None
-            session["mode"] = "live"
-            session["scenario_name"] = None
-            session["scenario_label"] = None
-            session["generation"] += 1
+            await _clear_simulation(session)
             if old is not None:
                 await old.aclose()
         return JSONResponse({"authenticated": False})
@@ -293,8 +317,12 @@ def create_app(
             raise PermissionError("session required")
         catalog = {name: named_scenario(name) for name in available_scenarios()}
         catalog.update(context["simulation_catalog"])
-        return {"scenarios": [{"name": name, "devices": len(value.devices),
-                               "projects": len(value.projects)} for name, value in catalog.items()]}
+        return {
+            "scenarios": [
+                {"name": name, "devices": len(value.devices), "projects": len(value.projects)}
+                for name, value in catalog.items()
+            ]
+        }
 
     @app.post("/api/simulation/start")
     async def simulation_start(request: Request, body: dict[str, Any]) -> dict[str, Any]:
@@ -306,6 +334,7 @@ def create_app(
             raise ValueError("scenario input is too large")
         if "toml" in body:
             import tomllib
+
             source = body["toml"]
             filename = body.get("filename")
             if not isinstance(source, str):
@@ -344,18 +373,30 @@ def create_app(
             session["scenario_label"] = label
             session["seed"] = seed
             session["mode"] = "simulation"
-            session["generation"] += 1
+            _advance_workspace(session)
             if previous is not None:
                 previous.close()
             if previous_client is not None:
                 await previous_client.aclose()
             if previous_http is not None:
                 await previous_http.aclose()
-        return {"mode": "simulation", "scenario": name, "label": label, "seed": seed,
-                "projects": [{"uid": value.uid, "label": value.label} for value in scenario.projects],
-                "devices": [{"project_uid": value.project_uid, "uid": value.uid,
-                             "label": value.serial_number or value.uid} for value in scenario.devices],
-                "generation": session["generation"], "snapshot": _simulation_snapshot(replacement)}
+        return {
+            "mode": "simulation",
+            "scenario": name,
+            "label": label,
+            "seed": seed,
+            "projects": [{"uid": value.uid, "label": value.label} for value in scenario.projects],
+            "devices": [
+                {
+                    "project_uid": value.project_uid,
+                    "uid": value.uid,
+                    "label": value.serial_number or value.uid,
+                }
+                for value in scenario.devices
+            ],
+            "generation": session["generation"],
+            "snapshot": _simulation_snapshot(replacement),
+        }
 
     async def simulation_session(request: Request) -> RuntimeSession:
         session_id = request.cookies.get("notehub_session", "")
@@ -372,33 +413,32 @@ def create_app(
         run = session["simulation"]
         if run is None:
             raise RuntimeError("simulation session lost its run")
-        return {"scenario": session["scenario_name"], "label": session["scenario_label"],
-                "projects": [{"uid": value.uid, "label": value.label}
-                             for value in run.scenario.projects],
-                "devices": [{"project_uid": value.project_uid, "uid": value.uid,
-                             "label": value.serial_number or value.uid}
-                            for value in run.scenario.devices], "seed": session["seed"],
-                "generation": session["generation"], "live_session": session["client"] is not None,
-                "snapshot": _simulation_snapshot(run)}
+        return {
+            "scenario": session["scenario_name"],
+            "label": session["scenario_label"],
+            "projects": [
+                {"uid": value.uid, "label": value.label} for value in run.scenario.projects
+            ],
+            "devices": [
+                {
+                    "project_uid": value.project_uid,
+                    "uid": value.uid,
+                    "label": value.serial_number or value.uid,
+                }
+                for value in run.scenario.devices
+            ],
+            "seed": session["seed"],
+            "generation": session["generation"],
+            "live_session": session["client"] is not None,
+            "snapshot": _simulation_snapshot(run),
+        }
 
     @app.post("/api/simulation/stop")
     async def simulation_stop(request: Request) -> dict[str, Any]:
         """Return this browser session to its preserved live client, if any."""
         session = await simulation_session(request)
         async with session["lock"]:
-            if session["simulation"] is not None:
-                session["simulation"].close()
-            if session["simulation_client"] is not None:
-                await session["simulation_client"].aclose()
-            if session["simulation_http"] is not None:
-                await session["simulation_http"].aclose()
-            session["simulation"] = None
-            session["simulation_client"] = None
-            session["simulation_http"] = None
-            session["mode"] = "live"
-            session["scenario_name"] = None
-            session["scenario_label"] = None
-            session["generation"] += 1
+            await _clear_simulation(session)
         return {"mode": "live", "authenticated": session["client"] is not None}
 
     @app.get("/api/simulation/events")
@@ -407,7 +447,10 @@ def create_app(
         run = session["simulation"]
         if run is None:
             raise RuntimeError("simulation session lost its run")
-        return {"events": _json_value(run.snapshot()["events"]), "generation": session["generation"]}
+        return {
+            "events": _json_value(run.snapshot()["events"]),
+            "generation": session["generation"],
+        }
 
     @app.post("/api/simulation/control")
     async def simulation_control(request: Request, body: dict[str, Any]) -> dict[str, Any]:
@@ -422,19 +465,29 @@ def create_app(
         async with session["lock"]:
             if action == "advance":
                 seconds = body.get("seconds", 60)
-                if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds < 0:
+                if (
+                    isinstance(seconds, bool)
+                    or not isinstance(seconds, (int, float))
+                    or seconds < 0
+                ):
                     raise ValueError("seconds must be a nonnegative number")
                 from datetime import timedelta
+
                 run.advance(timedelta(seconds=seconds))
                 result: Any = {"now": run.now.isoformat()}
             elif action == "cycle":
                 seconds = body.get("seconds", 60)
                 project = body.get("project_uid")
-                if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds < 0:
+                if (
+                    isinstance(seconds, bool)
+                    or not isinstance(seconds, (int, float))
+                    or seconds < 0
+                ):
                     raise ValueError("seconds must be a nonnegative number")
                 if not isinstance(project, str):
                     raise ValueError("project_uid is required")
                 from datetime import timedelta
+
                 run.advance(timedelta(seconds=seconds))
                 stepped = {
                     (binding.project_uid, binding.device_uid): run.device(
@@ -448,8 +501,13 @@ def create_app(
                     for definition in run.scenario.devices
                     if definition.project_uid == project
                 ]
-                result = {"steps": [{"project_uid": p, "device_uid": d, "result": value}
-                                    for (p, d), value in stepped.items()], "syncs": synced}
+                result = {
+                    "steps": [
+                        {"project_uid": p, "device_uid": d, "result": value}
+                        for (p, d), value in stepped.items()
+                    ],
+                    "syncs": synced,
+                }
             elif action == "step":
                 project, device = body.get("project_uid"), body.get("device_uid")
                 if project is not None and not isinstance(project, str):
@@ -457,8 +515,11 @@ def create_app(
                 if device is not None and not isinstance(device, str):
                     raise ValueError("device_uid must be a string")
                 result = [
-                    {"project_uid": binding.project_uid, "device_uid": binding.device_uid,
-                     "result": run.device(binding.project_uid, binding.device_uid).step()}
+                    {
+                        "project_uid": binding.project_uid,
+                        "device_uid": binding.device_uid,
+                        "result": run.device(binding.project_uid, binding.device_uid).step(),
+                    }
                     for binding in run.scenario.behaviors
                     if (project is None or binding.project_uid == project)
                     and (device is None or binding.device_uid == device)
@@ -469,10 +530,15 @@ def create_app(
                     raise ValueError("project_uid is required")
                 if device is not None and not isinstance(device, str):
                     raise ValueError("device_uid must be a string")
-                devices = [run.device(project, device)] if device else [
-                    run.device(project, definition.uid) for definition in run.scenario.devices
-                    if definition.project_uid == project
-                ]
+                devices = (
+                    [run.device(project, device)]
+                    if device
+                    else [
+                        run.device(project, definition.uid)
+                        for definition in run.scenario.devices
+                        if definition.project_uid == project
+                    ]
+                )
                 result = tuple(item.sync() for item in devices)
             elif action == "command":
                 project, device = body.get("project_uid"), body.get("device_uid")
@@ -490,34 +556,43 @@ def create_app(
                 )
                 result = {"queued": True}
             elif action == "fault":
-                run.fail_next(body["method"], body["path"], status_code=body.get("status_code", 500),
-                              retry_after=body.get("retry_after"))
+                run.fail_next(
+                    body["method"],
+                    body["path"],
+                    status_code=body.get("status_code", 500),
+                    retry_after=body.get("retry_after"),
+                )
                 result = {"queued": True}
             elif action == "reset":
                 replacement = run.scenario.start(registry=None, seed=session["seed"])
                 replacement_http = httpx.AsyncClient(transport=replacement.transport())
                 replacement_client = NotehubClient(
-                    "simulation-token", base_url="https://simulation.invalid",
+                    "simulation-token",
+                    base_url="https://simulation.invalid",
                     http_client=replacement_http,
                 )
                 previous_client = session["simulation_client"]
-                run.close()
-                if previous_client is not None:
-                    await previous_client.aclose()
-                if session["simulation_http"] is not None:
-                    await session["simulation_http"].aclose()
+                previous_http = session["simulation_http"]
                 session["simulation"] = replacement
                 session["simulation_http"] = replacement_http
                 session["simulation_client"] = replacement_client
-                session["generation"] += 1
+                _advance_workspace(session)
+                run.close()
+                if previous_client is not None:
+                    await previous_client.aclose()
+                if previous_http is not None:
+                    await previous_http.aclose()
                 result = {"reset": True}
             else:
                 raise ValueError("unknown simulation action")
         current = session["simulation"]
         if current is None:
             raise RuntimeError("simulation session lost its run")
-        return {"generation": session["generation"], "result": _json_value(result),
-                "snapshot": _simulation_snapshot(current)}
+        return {
+            "generation": session["generation"],
+            "result": _json_value(result),
+            "snapshot": _simulation_snapshot(current),
+        }
 
     @app.post("/api/commands")
     async def command(body: CommandRequest, client: NotehubClientDep) -> Any:
@@ -585,44 +660,83 @@ def create_app(
 
     @app.get("/api/projects/{project_uid}/stream/events")
     async def stream_events(
-        request: Request, project_uid: str, client: NotehubClientDep
-    ) -> StreamingResponse:
+        request: Request, project_uid: str, mode: str | None = None
+    ) -> Response:
         """Poll Notehub cursors and relay whole pages over SSE."""
+        session = get_runtime_session(request)
+        if mode is not None and mode != session["mode"]:
+            # A 204 tells EventSource to stop reconnecting to this workspace.
+            return Response(status_code=204)
+        client = active_session_client(session)
+        workspace_changed = session["workspace_changed"]
         cursor = request.headers.get("last-event-id") or str((time.time_ns() // 1000) - 60_000_000)
 
-        async def generate() -> AsyncIterator[str]:
+        async def poll() -> Any:
+            if workspace_changed.is_set():
+                return None
+            return await client.events.list(
+                project_uid, pagination=CursorPagination(cursor=cursor, page_size=100)
+            )
+
+        async def generate(invalidated: asyncio.Task[bool]) -> AsyncIterator[str]:
             nonlocal cursor
-            while not await request.is_disconnected():
+            seen = {cursor}
+            while not await request.is_disconnected() and not workspace_changed.is_set():
                 try:
-                    page = await paced_read(
-                        lambda: client.events.list(
-                            project_uid, pagination=CursorPagination(cursor=cursor, page_size=100)
+                    pending = asyncio.create_task(paced_read(poll))
+                    try:
+                        await asyncio.wait(
+                            (pending, invalidated), return_when=asyncio.FIRST_COMPLETED
                         )
-                    )
+                        if workspace_changed.is_set():
+                            break
+                        page = pending.result()
+                    finally:
+                        pending.cancel()
+                        await asyncio.gather(pending, return_exceptions=True)
+                    if workspace_changed.is_set():
+                        break
                     next_cursor = page.get("next_cursor")
                     if not next_cursor:
                         yield 'event: error\ndata: {"code":"cursor_missing"}\n\n'
+                    elif any(char in next_cursor for char in "\r\n\0"):
+                        yield 'event: error\ndata: {"code":"cursor_invalid"}\n\n'
+                    elif next_cursor in seen and (page["has_more"] or next_cursor != cursor):
+                        yield 'event: error\ndata: {"code":"cursor_repeated"}\n\n'
                     else:
                         cursor = next_cursor
+                        seen.add(cursor)
                         if page["events"]:
                             payload = json.dumps(
                                 {"events": page["events"], "checked_at": time.time()}
                             )
                             yield f"id: {cursor}\nevent: batch\ndata: {payload}\n\n"
                         else:
-                            yield f'event: heartbeat\ndata: {{"checked_at":{time.time()}}}\n\n'
+                            yield f'id: {cursor}\nevent: heartbeat\ndata: {{"checked_at":{time.time()}}}\n\n'
                         if page["has_more"]:
                             continue
+                        seen = {cursor}
                 except NotehubError as error:
                     yield f'event: error\ndata: {{"code":"{type(error).__name__}"}}\n\n'
                 except RuntimeError as error:
                     if "client has been closed" in str(error).casefold():
                         return
                     raise
-                await asyncio.sleep(60)
+                await asyncio.wait((invalidated,), timeout=60)
+            if workspace_changed.is_set():
+                yield "event: workspace_changed\ndata: {}\n\n"
+
+        async def body() -> AsyncIterator[str]:
+            invalidated = asyncio.create_task(workspace_changed.wait())
+            try:
+                async for frame in generate(invalidated):
+                    yield frame
+            finally:
+                invalidated.cancel()
+                await asyncio.gather(invalidated, return_exceptions=True)
 
         return StreamingResponse(
-            generate(), media_type="text/event-stream", headers={"Cache-Control": "no-store"}
+            body(), media_type="text/event-stream", headers={"Cache-Control": "no-store"}
         )
 
     if dashboard:
